@@ -1,0 +1,3 @@
+"""Twitch Chat Control: explicit, bounded chat-to-game inputs."""
+
+__version__ = "0.1.0"

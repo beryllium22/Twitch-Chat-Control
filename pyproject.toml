@@ -1,0 +1,32 @@
+[build-system]
+requires = ["setuptools==84.2.1"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "twitch-chat-control"
+version = "0.1.0"
+description = "A Windows desktop app for bounded, streamer-approved Twitch chat game controls."
+readme = "README.md"
+requires-python = ">=3.11,<3.15"
+dependencies = ["websockets==17.4"]
+
+[project.optional-dependencies]
+dev = ["pytest==9.2.0", "ruff==0.17.3"]
+build = ["pyinstaller==6.22.3"]
+
+[project.gui-scripts]
+twitch-chat-control = "twitch_chat_control.__main__:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["src"]
+
+[tool.ruff]
+target-version = "py311"
+line-length = 110
+
+[tool.ruff.lint]
+select = ["E4", "E7", "E9", "F", "I"]
