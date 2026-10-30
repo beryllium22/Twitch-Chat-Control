@@ -135,7 +135,7 @@ def gui(monkeypatch):
         except tk.TclError:
             pass
         if app is not None and not app._closed:
-            app.close()
+            app.close(force=True)
         elif app is None:
             root.destroy()
 

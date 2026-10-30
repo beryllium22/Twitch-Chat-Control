@@ -10,14 +10,17 @@ import tkinter as tk
 import tkinter.font as tkfont
 import uuid
 import webbrowser
+from dataclasses import replace
 from datetime import datetime
 from pathlib import Path
 from tkinter import filedialog, messagebox, ttk
 from typing import Any, Callable
 
 from . import __version__
+from .control_editor import CommandEditor
 from .engine import SafetyEngine
-from .models import AUDIENCES, SAFE_KEYS, Command, Profile
+from .models import AUDIENCES, Command, Profile, ProfileError
+from .presets import PROFILE_TEMPLATES, PreviewBackend, new_profile
 from .profile_io import load_profile, save_profile
 from .twitch import ACTIVATE_URL, ChatMessage, TwitchClient
 from .windows import WindowsBackend
@@ -90,6 +93,10 @@ class App:
         self._stop = threading.Event()
         self._last_ui_heartbeat = time.monotonic()
         self._profile = Profile.default()
+        self._profile_path: Path | None = None
+        self._saved_profile: Profile | None = self._profile
+        self.profile_name = tk.StringVar(master=root)
+        self.notice_var = tk.StringVar(master=root)
         self._windows: list[Any] = []
         self._device_dialog: tk.Toplevel | None = None
         self._device_value: tk.StringVar | None = None
@@ -142,6 +149,7 @@ class App:
         style.configure("Danger.TButton", background="#9b3446", foreground="white", font=(self._font_family, 11, "bold"))
         style.map("Danger.TButton", background=[("active", "#bd4157")])
         style.configure("TEntry", fieldbackground="#233146", foreground=TEXT, insertcolor=TEXT, padding=6)
+        style.configure("TSpinbox", fieldbackground="#233146", foreground=TEXT, insertcolor=TEXT, padding=6)
         style.configure("TCombobox", fieldbackground="#233146", foreground=TEXT, padding=6)
         style.map("TCombobox", fieldbackground=[("readonly", "#233146")], foreground=[("readonly", TEXT)])
         style.configure("TNotebook", background=BG, borderwidth=0)
@@ -176,13 +184,14 @@ class App:
         book.pack(fill="both", expand=True)
         session_page = ScrollPage(book)
         self.session_tab = session_page.content
-        self.commands_tab = ttk.Frame(book, padding=20)
+        commands_page = ScrollPage(book)
+        self.commands_tab = commands_page.content
         safety_page = ScrollPage(book)
         self.safety_tab = safety_page.content
         self.activity_tab = ttk.Frame(book, padding=20)
         for frame, label in (
             (session_page, "Session"),
-            (self.commands_tab, "Commands"),
+            (commands_page, "Controls & commands"),
             (safety_page, "Safety & access"),
             (self.activity_tab, "Activity"),
         ):
@@ -191,10 +200,10 @@ class App:
         self._build_commands()
         self._build_safety()
         self._build_activity()
+        book.bind("<<NotebookTabChanged>>", lambda _event: self.command_editor.cancel_capture())
 
         footer = ttk.Frame(outer, padding=(0, 12, 0, 0))
         footer.pack(fill="x")
-        self.notice_var = tk.StringVar(value="")
         ttk.Label(footer, textvariable=self.notice_var, style="Muted.TLabel", wraplength=1030).pack(anchor="w")
 
     def _build_session(self) -> None:
@@ -262,29 +271,35 @@ class App:
     def _build_commands(self) -> None:
         frame = self.commands_tab
         top = ttk.Frame(frame)
-        top.pack(fill="x", pady=(0, 12))
-        ttk.Label(top, text="Approved game commands", style="Heading.TLabel").pack(side="left")
-        ttk.Button(top, text="Import profile", command=self._import_profile).pack(side="right", padx=(8, 0))
-        ttk.Button(top, text="Export profile", command=self._export_profile).pack(side="right")
-        ttk.Label(frame, text="One exact command maps to one short key press. No chat arguments, scripts, mouse input, or key combinations.", style="Muted.TLabel", wraplength=990).pack(anchor="w", pady=(0, 12))
-        self.command_tree = ttk.Treeview(frame, columns=("trigger", "key", "hold", "cooldown", "enabled"), show="headings", height=10, selectmode="browse")
-        for name, title, width in (("trigger", "Chat command", 220), ("key", "Game key", 160), ("hold", "Hold (ms)", 130), ("cooldown", "Cooldown (ms)", 160), ("enabled", "Enabled", 100)):
-            self.command_tree.heading(name, text=title)
-            self.command_tree.column(name, width=width, anchor="w")
-        self.command_tree.pack(fill="both", expand=True)
-        self.command_tree.bind("<Double-1>", lambda _event: self._edit_command())
-        row = ttk.Frame(frame, padding=(0, 12, 0, 12))
-        row.pack(fill="x")
-        ttk.Button(row, text="Add command", command=lambda: self._edit_command(new=True)).pack(side="left", padx=(0, 8))
-        ttk.Button(row, text="Edit selected", command=self._edit_command).pack(side="left", padx=(0, 8))
-        ttk.Button(row, text="Remove selected", command=self._remove_command).pack(side="left")
-        ttk.Label(frame, text="Editing or importing a profile disarms controls. Imported profiles use the same safety limits as the editor.", style="Muted.TLabel", wraplength=990).pack(anchor="w")
+        top.pack(fill="x", pady=(0, 8))
+        ttk.Label(top, text="Build your game controls", style="Heading.TLabel").pack(side="left")
+        ttk.Button(top, text="Save as...", command=lambda: self._save_profile(save_as=True)).pack(side="right", padx=(8, 0))
+        ttk.Button(top, text="Save profile", style="Accent.TButton", command=self._save_profile).pack(side="right", padx=(8, 0))
+        ttk.Button(top, text="Open...", command=self._import_profile).pack(side="right")
+        row = ttk.Frame(frame)
+        row.pack(fill="x", pady=(0, 7))
+        ttk.Label(row, text="Profile name").pack(side="left", padx=(0, 8))
+        ttk.Entry(row, textvariable=self.profile_name, width=24).pack(side="left", padx=(0, 18))
+        ttk.Label(row, text="New from").pack(side="left", padx=(0, 8))
+        self.template_var = tk.StringVar(value="Blank")
+        ttk.Combobox(row, textvariable=self.template_var, values=PROFILE_TEMPLATES, state="readonly", width=19).pack(side="left", padx=(0, 8))
+        ttk.Button(row, text="New profile", command=self._new_profile).pack(side="left")
+        self.profile_status_var = tk.StringVar()
+        ttk.Label(frame, textvariable=self.profile_status_var, style="Muted.TLabel", wraplength=880).pack(anchor="w", pady=(0, 12))
+        self.command_editor = CommandEditor(
+            frame,
+            on_change=self._commands_changed,
+            on_edit=self._command_draft_edited,
+            on_preview=self._preview_command,
+            on_panic=self._panic,
+            on_notice=self.notice_var.set,
+        )
+        self.command_editor.pack(fill="both", expand=True)
 
     def _build_safety(self) -> None:
         frame = self.safety_tab
         frame.columnconfigure(1, weight=1)
         ttk.Label(frame, text="Participation and input limits", style="Heading.TLabel").grid(row=0, column=0, columnspan=3, sticky="w", pady=(0, 10))
-        self.profile_name = tk.StringVar()
         self.audience_var = tk.StringVar()
         self.allowed_var = tk.StringVar()
         self.blocked_var = tk.StringVar()
@@ -387,7 +402,14 @@ class App:
                 if generation == self._generation:
                     self._show_device(uri, code)
         snapshot = self.engine.snapshot()
-        mode = "PREVIEW" if snapshot.preview else "LIVE GAME INPUT"
+        # Windows may consume F8 as a registered global hotkey before Tk sees
+        # a key event. Mirror the native stop on the GUI thread as well.
+        if snapshot.reason == "emergency_stop":
+            self.command_editor.cancel_capture()
+        # While disarmed, show the locally selected mode. The engine remembers
+        # its last armed mode until the next explicit local arm.
+        selected_preview = self.mode_var.get() == "preview" if snapshot.state == "disarmed" else snapshot.preview
+        mode = "PREVIEW" if selected_preview else "LIVE GAME INPUT"
         state_text = f"ARMING {snapshot.pending_seconds:.1f}s" if snapshot.state == "pending" else snapshot.state.upper()
         self.state_var.set(f"{state_text} · {mode}")
         self.arm_button.configure(text="Arm preview" if self.mode_var.get() == "preview" else "Arm live · 3 seconds")
@@ -399,6 +421,7 @@ class App:
             self.safety_var.set("F8 emergency hotkey is registered. Foreground, process identity, modifier, and held-key checks are active.")
         else:
             self.safety_var.set("Live input unavailable: the F8 hotkey or native safety checks are not ready. Run without administrator rights and free F8 in other apps.")
+        self._update_profile_status()
         self.root.after(50, self._pump)
 
     def _log(self, text: str) -> None:
@@ -545,7 +568,8 @@ class App:
         if self._stop.is_set():
             messagebox.showerror("Safety worker stopped", "Restart the app before arming controls.", parent=self.root)
             return
-        if self._dirty and not self._apply_profile():
+        self.command_editor.cancel_capture()
+        if not self._apply_pending_profile():
             return
         preview = self.mode_var.get() == "preview"
         if not preview and not self.ack_var.get():
@@ -559,6 +583,7 @@ class App:
             self.notice_var.set("Preview armed. Try a command below or connect Twitch. No keys are sent.")
 
     def _panic(self) -> None:
+        self.command_editor.cancel_capture()
         self.engine.emergency_stop()
         self.notice_var.set("Emergency stop. All queued controls cleared; manual arming is required.")
 
@@ -574,7 +599,7 @@ class App:
         )
         decision = self.engine.submit(message)
         if decision.reason in {"not_an_exact_command", "unknown_or_disabled_command"}:
-            self.notice_var.set("Enter one exact enabled command from the Commands tab, with no spaces or arguments.")
+            self.notice_var.set("Enter one exact enabled command from Controls & commands, with no spaces or arguments.")
         elif not decision.accepted:
             self.notice_var.set("Preview rejected: " + decision.reason.replace("_", " ") + ".")
 
@@ -582,23 +607,47 @@ class App:
         if not self._loading:
             self._dirty = True
             self.engine.disarm("profile_editing")
+            self._update_profile_status()
 
-    def _show_profile(self, profile: Profile) -> None:
+    def _command_draft_edited(self) -> None:
+        self.engine.disarm("command_editing")
+        self._update_profile_status()
+
+    def _has_unsaved_changes(self) -> bool:
+        editor_dirty = getattr(getattr(self, "command_editor", None), "dirty", False)
+        return self._dirty or editor_dirty or self._profile != self._saved_profile
+
+    def _update_profile_status(self) -> None:
+        if not hasattr(self, "profile_status_var"):
+            return
+        if self._profile_path is None:
+            location = "No profile file selected"
+        else:
+            location = "File: " + "".join(c for c in self._profile_path.name if c.isprintable())[:80]
+        state = "Unsaved changes" if self._has_unsaved_changes() else (
+            "Saved" if self._profile_path is not None else "Built-in starter profile"
+        )
+        value = f"{state}  |  {location}  |  Save keeps commands and safety settings only."
+        if self.profile_status_var.get() != value:
+            self.profile_status_var.set(value)
+
+    def _show_profile(self, profile: Profile, *, refresh_editor: bool = True) -> None:
         self._loading = True
-        data = profile.to_dict()
-        self.profile_name.set(data["name"])
-        self.audience_var.set(data["audience"])
-        for field, var in self.limit_vars.items():
-            var.set(str(data[field]))
-        self.allowed_var.set(", ".join(data["allowed_user_ids"]))
-        self.blocked_var.set(", ".join(data["blocked_user_ids"]))
-        for item in self.command_tree.get_children():
-            self.command_tree.delete(item)
-        for index, command in enumerate(data["commands"]):
-            self.command_tree.insert("", "end", iid=str(index), values=(command["trigger"], command["key"], command["hold_ms"], command["cooldown_ms"], "Yes" if command["enabled"] else "No"))
-        self._profile = profile
-        self._loading = False
-        self._dirty = False
+        try:
+            data = profile.to_dict()
+            self.profile_name.set(data["name"])
+            self.audience_var.set(data["audience"])
+            for field, var in self.limit_vars.items():
+                var.set(str(data[field]))
+            self.allowed_var.set(", ".join(data["allowed_user_ids"]))
+            self.blocked_var.set(", ".join(data["blocked_user_ids"]))
+            if refresh_editor:
+                self.command_editor.set_commands(profile.commands)
+            self._profile = profile
+            self._dirty = False
+        finally:
+            self._loading = False
+        self._update_profile_status()
 
     def _read_profile_fields(self) -> Profile:
         data = self._profile.to_dict()
@@ -606,124 +655,180 @@ class App:
         data["audience"] = self.audience_var.get()
         for field, var in self.limit_vars.items():
             value = var.get().strip()
-            if not value.isascii() or not value.isdecimal():
-                raise ValueError("Limits must be whole numbers.")
+            if not value.isascii() or not value.isdecimal() or len(value) > 6:
+                raise ProfileError(f"{field.replace('_', ' ')} must be a whole number within the displayed range.")
             data[field] = int(value)
         for field, var in (("allowed_user_ids", self.allowed_var), ("blocked_user_ids", self.blocked_var)):
             raw = var.get().strip()
             data[field] = [part.strip() for part in raw.split(",")] if raw else []
         return Profile.from_dict(data)
 
+    def _profile_error(self, error: Exception) -> None:
+        detail = str(error) if isinstance(error, ProfileError) else "The profile could not be validated."
+        messagebox.showerror("Check safety settings", detail, parent=self.root)
+        self.notice_var.set("Correct the safety settings before applying commands, saving, or arming.")
+
     def _apply_profile(self) -> bool:
         self.engine.disarm("profile_apply")
         try:
             profile = self._read_profile_fields()
             self.engine.set_profile(profile)
-        except (ValueError, TypeError):
-            messagebox.showerror("Invalid safety settings", "Check the displayed limits, profile name, audience, and comma-separated numeric Twitch IDs. No settings were applied.", parent=self.root)
+        except (ValueError, TypeError) as error:
+            self._profile_error(error)
             return False
-        self._show_profile(profile)
-        self.notice_var.set("Safety settings applied. Controls remain disarmed.")
+        # Applying safety fields must not erase a pending command draft.
+        self._show_profile(profile, refresh_editor=False)
+        self.notice_var.set("Safety settings applied. Use Save profile to keep them for another session.")
         return True
 
-    def _edit_command(self, *, new: bool = False) -> None:
-        self.engine.disarm("command_editing")
-        if self._dirty and not self._apply_profile():
-            return
-        selection = self.command_tree.selection()
-        if not new and not selection:
-            return
-        index = None if new else int(selection[0])
-        data = self._profile.to_dict()
-        current = {"trigger": "!action", "key": "space", "hold_ms": 100, "cooldown_ms": 1000, "enabled": True} if new else data["commands"][index]
-        dialog = tk.Toplevel(self.root)
-        dialog.title("Add command" if new else "Edit command")
-        dialog.configure(bg=BG)
-        dialog.transient(self.root)
-        dialog.grab_set()
-        body = ttk.Frame(dialog, padding=24)
-        body.pack(fill="both", expand=True)
-        trigger = tk.StringVar(value=current["trigger"])
-        key = tk.StringVar(value=current["key"])
-        hold = tk.StringVar(value=str(current["hold_ms"]))
-        cooldown = tk.StringVar(value=str(current["cooldown_ms"]))
-        enabled = tk.BooleanVar(value=current["enabled"])
-        self._field(body, 0, "Exact chat command", trigger, "Example: !jump")
-        ttk.Label(body, text="Game key").grid(row=1, column=0, sticky="w")
-        ttk.Combobox(body, textvariable=key, values=tuple(sorted(SAFE_KEYS)), state="readonly").grid(row=1, column=1, sticky="ew", pady=5)
-        self._field(body, 2, "Hold (ms)", hold, "10-450")
-        self._field(body, 3, "Command cooldown (ms)", cooldown, "0-60,000")
-        ttk.Checkbutton(body, text="Enabled", variable=enabled).grid(row=4, column=1, sticky="w")
-
-        def save() -> None:
-            try:
-                candidate = {"trigger": trigger.get(), "key": key.get(), "hold_ms": int(hold.get()), "cooldown_ms": int(cooldown.get()), "enabled": enabled.get()}
-                command = Command.from_dict(candidate)
-                if index is None:
-                    data["commands"].append(command.to_dict())
-                else:
-                    data["commands"][index] = command.to_dict()
-                profile = Profile.from_dict(data)
-                self.engine.set_profile(profile)
-            except (ValueError, TypeError):
-                messagebox.showerror("Invalid command", "Use a unique !command, an allowed game key, a 10-450 ms hold, and a 0-60,000 ms cooldown. Maximum 64 commands.", parent=dialog)
-                # Rebuild next attempt from the original profile, never a failed mutation.
-                data["commands"] = self._profile.to_dict()["commands"]
-                return
-            self._show_profile(profile)
-            dialog.destroy()
-
-        ttk.Button(body, text="Save command", style="Accent.TButton", command=save).grid(row=5, column=1, sticky="w", pady=(12, 0))
-
-    def _remove_command(self) -> None:
-        self.engine.disarm("command_removed")
-        if self._dirty and not self._apply_profile():
-            return
-        selection = self.command_tree.selection()
-        if not selection:
-            return
-        data = self._profile.to_dict()
-        del data["commands"][int(selection[0])]
+    def _commands_changed(self, commands: tuple[Command, ...]) -> bool:
+        self.engine.disarm("commands_changed")
         try:
-            profile = Profile.from_dict(data)
+            # Validate both sets of fields before changing either. Editor owns
+            # its draft/selection until this callback confirms success.
+            profile = replace(self._read_profile_fields(), commands=commands)
+            self.engine.set_profile(profile)
+        except (ValueError, TypeError) as error:
+            self._profile_error(error)
+            return False
+        self._show_profile(profile, refresh_editor=False)
+        self.notice_var.set("Command mapping applied. Use Save profile to keep it for another session.")
+        return True
+
+    def _apply_pending_profile(self) -> bool:
+        if not self.command_editor.apply_pending():
+            self.engine.disarm("invalid_command_draft")
+            return False
+        return self._apply_profile() if self._dirty else True
+
+    def _preview_command(self, command: Command) -> str:
+        # A mapping preview never arms the connected-chat engine. Its backend
+        # has no operating-system input API, even when a game is selected.
+        self.engine.disarm("command_preview")
+        self.command_editor.cancel_capture()
+        self.mode_var.set("preview")
+        self._mode_changed()
+        if not self._apply_pending_profile():
+            return "Preview stopped. Correct the command or safety settings first."
+        if command not in self._profile.commands:
+            return "Apply this command before previewing it."
+        role = self.sim_role.get()
+        preview = SafetyEngine(PreviewBackend(), profile=self._profile, clock=time.monotonic)
+        preview.arm(preview=True)
+        message = ChatMessage(
+            message_id=f"preview-{uuid.uuid4()}", user_id="100000001", login="preview_viewer",
+            text=command.trigger, roles=frozenset() if role == "viewer" else frozenset({role}),
+            channel_id="100000002", received_at=time.monotonic(),
+        )
+        decision = preview.submit(message)
+        if decision.accepted:
+            preview.tick()
+            label = {"space": "Space", "left": "Arrow Left", "right": "Arrow Right",
+                     "up": "Arrow Up", "down": "Arrow Down"}.get(command.key, command.key.upper())
+            result = f"Preview only: {command.trigger} -> {label} for {command.hold_ms} ms. Allowed as {role}; no key sent."
+        else:
+            result = f"Preview as {role}: {decision.reason.replace('_', ' ')}. No key sent. Change the preview role on Session if needed."
+        preview.disarm("preview_complete")
+        self.notice_var.set(result)
+        self._log(result)
+        return result
+
+    def _confirm_profile_replacement(self, action: str) -> bool:
+        self.engine.disarm("profile_navigation")
+        self.command_editor.cancel_capture()
+        if not self._has_unsaved_changes():
+            return True
+        answer = messagebox.askyesnocancel(
+            "Save profile changes?",
+            f"Save your command mappings and safety settings before {action}?"
+            "\n\nYes saves them. No discards them. Cancel keeps the current profile open.",
+            parent=self.root,
+        )
+        if answer is None:
+            return False
+        if answer:
+            return self._save_profile()
+        return True
+
+    def _new_profile(self) -> None:
+        self.engine.disarm("new_profile")
+        self.command_editor.cancel_capture()
+        try:
+            profile = new_profile(self.template_var.get())
         except ValueError:
-            self.notice_var.set("The updated profile could not be validated. Controls remain disarmed.")
+            self.notice_var.set("Choose Blank, WASD movement, or Arrow-key movement for the new profile.")
+            return
+        if not self._confirm_profile_replacement("creating a new profile"):
             return
         self.engine.set_profile(profile)
+        self._profile_path = None
+        self._saved_profile = None
         self._show_profile(profile)
+        self.notice_var.set("New profile created with moderator-only defaults. Name it, configure commands, and Save profile.")
 
     def _import_profile(self) -> None:
-        self.engine.disarm("profile_import")
-        path = filedialog.askopenfilename(title="Import command profile", filetypes=[("JSON profile", "*.json")], parent=self.root)
+        self.engine.disarm("profile_open")
+        self.command_editor.cancel_capture()
+        path = filedialog.askopenfilename(title="Open command profile", filetypes=[("Command profiles", "*.json")], parent=self.root)
         if not path:
             return
         try:
             profile = load_profile(path)
-            self.engine.set_profile(profile)
         except (OSError, ValueError, TypeError):
-            messagebox.showerror("Profile rejected", "The file is not a valid, bounded command profile. Unknown fields, duplicates, unsafe keys, and out-of-range limits are not allowed.", parent=self.root)
+            messagebox.showerror("Profile rejected", "The file could not be opened as a valid command profile. Your current profile and draft edits are unchanged.", parent=self.root)
             return
+        if not self._confirm_profile_replacement("opening another profile"):
+            return
+        try:
+            # Saving the current profile in the prompt may have updated the same
+            # file. Read and validate again rather than loading stale contents.
+            profile = load_profile(path)
+        except (OSError, ValueError, TypeError):
+            messagebox.showerror("Profile changed", "The selected file changed or became unreadable. The current profile remains open.", parent=self.root)
+            return
+        self.engine.set_profile(profile)
+        self._profile_path = Path(path)
+        self._saved_profile = profile
         self._show_profile(profile)
-        self.notice_var.set("Profile imported. Review commands and audience before arming.")
+        self.notice_var.set("Profile opened. Review commands and audience before arming.")
+
+    def _save_profile(self, *, save_as: bool = False) -> bool:
+        self.engine.disarm("profile_save")
+        self.command_editor.cancel_capture()
+        path = self._profile_path
+        if save_as or path is None:
+            chosen = filedialog.asksaveasfilename(
+                title="Save command profile", defaultextension=".json",
+                initialfile=path.name if path is not None else "game-profile.json",
+                filetypes=[("Command profiles", "*.json")], parent=self.root,
+            )
+            if not chosen:
+                return False
+            path = Path(chosen)
+        if not self._apply_pending_profile():
+            return False
+        try:
+            save_profile(self._profile, path)
+        except (OSError, ValueError, TypeError):
+            messagebox.showerror("Could not save profile", "The profile was not saved. Choose a writable location and try again; your changes remain in the app.", parent=self.root)
+            return False
+        self._profile_path = path
+        self._saved_profile = self._profile
+        self._update_profile_status()
+        self.notice_var.set("Profile saved. Only command mappings and safety settings were written.")
+        return True
 
     def _export_profile(self) -> None:
-        self.engine.disarm("profile_export")
-        if self._dirty and not self._apply_profile():
-            return
-        path = filedialog.asksaveasfilename(title="Export command profile", defaultextension=".json", initialfile="game-profile.json", filetypes=[("JSON profile", "*.json")], parent=self.root)
-        if path:
-            try:
-                save_profile(self._profile, Path(path))
-            except (OSError, ValueError):
-                messagebox.showerror("Could not export", "Choose a writable location and try again.", parent=self.root)
-                return
-            self.notice_var.set("Profile exported. Authorization, window selection, and armed state are never exported.")
+        self._save_profile(save_as=True)
 
-    def close(self) -> None:
+    def close(self, *, force: bool = False) -> None:
         if self._closed:
             return
+        self.engine.disarm("shutdown_requested")
+        self.command_editor.cancel_capture()
+        if not force and not self._confirm_profile_replacement("closing the app"):
+            return
         self._closed = True
-        self.engine.disarm("shutdown")
         self._stop.set()
         self._disconnect()
         self.client_id_var.set("")

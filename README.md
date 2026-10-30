@@ -18,11 +18,11 @@ Linux and macOS support the offline preview and automated tests; native game inp
 
 ## First session
 
-1. Open **Preview** and try the built-in command simulator. No Twitch account or game is needed for this step.
-2. Review **Commands** and **Safety & access**. The starter profile restricts commands to moderators and the broadcaster. Select Everyone only when you want the wider chat to participate.
+1. Open **Controls & commands**. Edit the starter controls or choose **Blank**, **WASD movement**, or **Arrow-key movement** under **New from**, then click **New profile**. Configure your mappings and click **Apply**.
+2. Select a mapping and click **Preview** to check it without sending keys. No Twitch account or game is needed. This leaves the connected-chat engine disarmed in Preview mode. Review **Safety & access**; new profiles allow moderators and the broadcaster by default.
 3. Register your own Twitch **Public** application and enter its Client ID and your channel name in this app. See [Twitch setup](docs/TWITCH_SETUP.md). No client secret is needed or accepted.
 4. Select **Connect**, complete Twitch's device sign-in in your browser, and keep the sign-in code off your stream. Authorization is kept in process memory only.
-5. Start your game as a regular user, refresh the window list, and select its exact window. Select **Live game input**, acknowledge the game focus limitation, and click **Arm**. You have three seconds to focus the game.
+5. On **Session**, select the exact window of a game running as a regular user. Choose **Live game input · Windows**, acknowledge the game focus limitation, and click **Arm live · 3 seconds**. Focus the game before the countdown ends.
 6. Press **F8** at any time to stop. Returning to another window, losing the connection, or changing the profile also disarms controls. You must arm again locally.
 
 ## Safety boundaries
@@ -38,7 +38,11 @@ Linux and macOS support the offline preview and automated tests; native game inp
 
 ## Profiles
 
-The editor and imported JSON use the same strict validation. Saving a profile exports only commands and safety settings, never Twitch credentials, authorization, selected windows, or armed state. Unknown fields and duplicate JSON keys are rejected. Examples and field limits are described in [profiles](docs/PROFILES.md).
+Configure command mappings in **Controls & commands**; no JSON editing is required. Select a row to edit its exact chat command, game key, hold duration, cooldown, and enabled state. **New**, **Duplicate**, **Remove**, and **Disable / enable** manage mappings. Choose a key from the allowed-key picker or use **Press a key** while the app has focus. Capture accepts only an unmodified letter, digit, arrow, or Space; Escape cancels and F8 still stops control.
+
+**Apply** updates the current profile in memory. **Save profile** writes commands and safety settings to a profile file; **Save as...** creates a separate file and **Open...** loads one. The app prompts before replacing or closing a profile with unsaved changes. Draft changes disarm controls immediately. Credentials, authorization, selected windows, and armed state are never saved.
+
+The editor and imported JSON use the same strict validation. See the [GUI profile guide](docs/PROFILES.md) for templates, preview behavior, and field limits.
 
 ## Development and Windows build
 
