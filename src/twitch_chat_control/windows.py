@@ -253,6 +253,7 @@ class _Win32API:
         self.advapi32 = ctypes.WinDLL("advapi32", use_last_error=True)
         self.wtsapi32 = ctypes.WinDLL("wtsapi32", use_last_error=True)
         self._enum_proc = ctypes.WINFUNCTYPE(BOOL, HWND, LPARAM)
+        self._pressed_scan_codes: dict[str, tuple[int, int]] = {}
         self._bind()
 
     def _bind(self) -> None:
@@ -486,18 +487,33 @@ class _Win32API:
         # This method is deliberately not a general-purpose input API.
         if key not in SAFE_KEYS:
             return False
-        virtual_key = KEY_VK[key]
-        scan = self.user32.MapVirtualKeyW(virtual_key, 0)
-        if not scan or scan > 0xFF:
-            return False
-        flags = 0x0008  # KEYEVENTF_SCANCODE: games commonly expect scan codes.
-        if key in EXTENDED_KEYS:
-            flags |= 0x0001
         if up:
-            flags |= 0x0002
+            press = self._pressed_scan_codes.get(key)
+            if press is None:
+                # No down event was attempted. Never release an unrelated key.
+                return True
+            scan, flags = press
+        else:
+            if key in self._pressed_scan_codes:
+                # A repeated press must not overwrite an outstanding release.
+                return False
+            virtual_key = KEY_VK[key]
+            scan = self.user32.MapVirtualKeyW(virtual_key, 0)
+            if not scan or scan > 0xFF:
+                return False
+            flags = 0x0008  # KEYEVENTF_SCANCODE: games commonly expect scan codes.
+            if key in EXTENDED_KEYS:
+                flags |= 0x0001
+            # Remember the exact native press before trying SendInput, including
+            # an uncertain/failed insertion. A layout change must not remap its
+            # eventual key-up. Backend locking serializes all calls here.
+            self._pressed_scan_codes[key] = (scan, flags)
         packet = INPUT(type=1)
-        packet.ki = KEYBDINPUT(0, scan, flags, 0, 0)
-        return self.user32.SendInput(1, ctypes.byref(packet), ctypes.sizeof(INPUT)) == 1
+        packet.ki = KEYBDINPUT(0, scan, flags | (0x0002 if up else 0), 0, 0)
+        success = self.user32.SendInput(1, ctypes.byref(packet), ctypes.sizeof(INPUT)) == 1
+        if up and success:
+            self._pressed_scan_codes.pop(key, None)
+        return success
 
     def register_panic(self) -> bool:
         return bool(self.user32.RegisterHotKey(None, HOTKEY_ID, 0x4000, VK_F8))

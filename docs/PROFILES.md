@@ -12,7 +12,7 @@ Profiles contain only gameplay commands and participation/rate settings. They ne
 | `!right` | D | 150 ms | 300 ms |
 | `!jump` | Space | 100 ms | 1,000 ms |
 
-The default audience is **moderators and the broadcaster**. Select Everyone locally for open chat participation. Keys are sent as virtual keys, so game/layout behavior must be checked in preview followed by a controlled live test.
+The default audience is **moderators and the broadcaster**. Select Everyone locally for open chat participation. Windows resolves each configured key through its keyboard mapping and sends a scan-code input. Verify your keyboard layout and game bindings in a controlled live test after reviewing the profile in Preview.
 
 ## Exact commands
 

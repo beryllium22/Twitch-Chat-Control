@@ -413,3 +413,86 @@ def test_native_win32_declarations_with_read_only_calls():
     assert isinstance(api.foreground_window(), int)
     assert isinstance(api.input_desktop_active(), bool)
     assert isinstance(api.enumerate_windows(), list)
+
+
+class ChangingLayoutUser32:
+    def __init__(self):
+        self.mapping_calls = 0
+        self.events = []
+        self.outcomes = []
+
+    def MapVirtualKeyW(self, virtual_key, map_type):
+        self.mapping_calls += 1
+        # Simulate the same virtual key moving to a different physical key.
+        return 0x11 if self.mapping_calls == 1 else 0x2C
+
+    def SendInput(self, count, packets, size):
+        assert count == 1
+        assert size == ctypes.sizeof(INPUT)
+        packet = ctypes.cast(packets, ctypes.POINTER(INPUT)).contents
+        self.events.append((packet.ki.wScan, packet.ki.dwFlags))
+        outcome = self.outcomes.pop(0) if self.outcomes else 1
+        if isinstance(outcome, Exception):
+            raise outcome
+        return outcome
+
+
+def native_sender():
+    api = _Win32API.__new__(_Win32API)
+    api.user32 = ChangingLayoutUser32()
+    api._pressed_scan_codes = {}
+    return api
+
+
+@pytest.mark.parametrize("key,flags", [("w", 0x0008), ("left", 0x0009)])
+def test_layout_change_releases_exact_scan_and_flags_from_press(key, flags):
+    api = native_sender()
+    assert api.send_key(key, up=False)
+    assert api.send_key(key, up=True)
+    assert api.user32.mapping_calls == 1
+    assert api.user32.events == [(0x11, flags), (0x11, flags | 0x0002)]
+    assert api._pressed_scan_codes == {}
+    # A subsequent independent press is allowed to use the new layout.
+    assert api.send_key(key, up=False)
+    assert api.send_key(key, up=True)
+    assert api.user32.events[-2:] == [(0x2C, flags), (0x2C, flags | 0x0002)]
+
+
+def test_failed_release_keeps_original_scan_for_retry():
+    api = native_sender()
+    api.user32.outcomes = [1, 0, 1]
+    assert api.send_key("w", up=False)
+    assert not api.send_key("w", up=True)
+    assert api._pressed_scan_codes == {"w": (0x11, 0x0008)}
+    assert api.send_key("w", up=True)
+    assert api.user32.mapping_calls == 1
+    assert api.user32.events == [(0x11, 0x0008), (0x11, 0x000A), (0x11, 0x000A)]
+    assert api._pressed_scan_codes == {}
+
+
+@pytest.mark.parametrize("outcome", [0, OSError("simulated native error")])
+def test_uncertain_press_preserves_exact_scan_for_cleanup(outcome):
+    api = native_sender()
+    api.user32.outcomes = [outcome, 1]
+    if isinstance(outcome, Exception):
+        with pytest.raises(OSError):
+            api.send_key("w", up=False)
+    else:
+        assert not api.send_key("w", up=False)
+    assert api._pressed_scan_codes == {"w": (0x11, 0x0008)}
+    assert api.send_key("w", up=True)
+    assert api.user32.events == [(0x11, 0x0008), (0x11, 0x000A)]
+    assert api.user32.mapping_calls == 1
+
+
+def test_unmatched_release_and_repeated_press_cannot_remap_or_emit_input():
+    api = native_sender()
+    assert api.send_key("w", up=True)
+    assert api.user32.events == []
+    assert api.user32.mapping_calls == 0
+    assert api.send_key("w", up=False)
+    assert not api.send_key("w", up=False)
+    assert api._pressed_scan_codes == {"w": (0x11, 0x0008)}
+    assert api.user32.mapping_calls == 1
+    assert api.user32.events == [(0x11, 0x0008)]
+    assert api.send_key("w", up=True)
