@@ -2,6 +2,7 @@ name: Desktop tests and Windows build
 
 on:
   push:
+    branches: [main]
   pull_request:
   workflow_dispatch:
 

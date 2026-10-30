@@ -7,6 +7,7 @@ import queue
 import threading
 import time
 import tkinter as tk
+import tkinter.font as tkfont
 import uuid
 import webbrowser
 from datetime import datetime
@@ -26,6 +27,47 @@ PANEL = "#182334"
 TEXT = "#edf2f8"
 MUTED = "#a6b8cb"
 ACCENT = "#65e0c1"
+
+
+class ScrollPage(ttk.Frame):
+    """Keep all local controls reachable on smaller or scaled displays."""
+
+    def __init__(self, parent: ttk.Notebook) -> None:
+        super().__init__(parent)
+        self.canvas = tk.Canvas(self, bg=BG, highlightthickness=0, borderwidth=0)
+        scroll = ttk.Scrollbar(self, orient="vertical", command=self.canvas.yview)
+        self.canvas.configure(yscrollcommand=scroll.set)
+        scroll.pack(side="right", fill="y")
+        self.canvas.pack(side="left", fill="both", expand=True)
+        self.content = ttk.Frame(self.canvas, padding=20)
+        self._window = self.canvas.create_window((0, 0), window=self.content, anchor="nw")
+        self.content.bind("<Configure>", self._resize_content)
+        self.canvas.bind("<Configure>", self._resize_canvas)
+        self.bind_all("<MouseWheel>", self._wheel, add="+")
+        self.bind_all("<Button-4>", self._wheel, add="+")
+        self.bind_all("<Button-5>", self._wheel, add="+")
+
+    def _resize_content(self, _event: Any) -> None:
+        self.canvas.configure(scrollregion=self.canvas.bbox("all"))
+
+    def _resize_canvas(self, event: Any) -> None:
+        self.canvas.itemconfigure(self._window, width=event.width)
+
+    def _wheel(self, event: Any) -> None:
+        if not self.winfo_ismapped() or isinstance(event.widget, ttk.Combobox):
+            return
+        x, y = self.winfo_rootx(), self.winfo_rooty()
+        if not (x <= event.x_root < x + self.winfo_width() and y <= event.y_root < y + self.winfo_height()):
+            return
+        if self.content.winfo_reqheight() <= self.canvas.winfo_height():
+            return
+        if getattr(event, "num", 0) == 4:
+            direction = -1
+        elif getattr(event, "num", 0) == 5:
+            direction = 1
+        else:
+            direction = -1 if event.delta > 0 else 1
+        self.canvas.yview_scroll(direction * 3, "units")
 
 
 class App:
@@ -80,21 +122,24 @@ class App:
         self._post("notice", "Ready in preview. Review commands, then arm to try the simulator.")
 
     def _style(self) -> None:
+        families = {name.lower() for name in tkfont.families(self.root)}
+        self._font_family = "Segoe UI" if "segoe ui" in families else tkfont.nametofont("TkDefaultFont").actual("family")
+        self._mono_family = "Consolas" if "consolas" in families else "Courier"
         style = ttk.Style(self.root)
         style.theme_use("clam")
-        style.configure(".", background=BG, foreground=TEXT, font=("Segoe UI", 10))
+        style.configure(".", background=BG, foreground=TEXT, font=(self._font_family, 10))
         style.configure("TFrame", background=BG)
         style.configure("Card.TFrame", background=PANEL)
         style.configure("TLabel", background=BG, foreground=TEXT)
         style.configure("Muted.TLabel", foreground=MUTED)
-        style.configure("Title.TLabel", font=("Segoe UI", 24, "bold"))
-        style.configure("Heading.TLabel", font=("Segoe UI", 13, "bold"))
-        style.configure("Status.TLabel", foreground=ACCENT, font=("Segoe UI", 12, "bold"))
+        style.configure("Title.TLabel", font=(self._font_family, 24, "bold"))
+        style.configure("Heading.TLabel", font=(self._font_family, 13, "bold"))
+        style.configure("Status.TLabel", foreground=ACCENT, font=(self._font_family, 12, "bold"))
         style.configure("TButton", padding=(14, 9), background="#293a50", foreground=TEXT)
         style.map("TButton", background=[("active", "#354b67")])
         style.configure("Accent.TButton", background="#237f70", foreground="white")
         style.map("Accent.TButton", background=[("active", "#299984")])
-        style.configure("Danger.TButton", background="#9b3446", foreground="white", font=("Segoe UI", 11, "bold"))
+        style.configure("Danger.TButton", background="#9b3446", foreground="white", font=(self._font_family, 11, "bold"))
         style.map("Danger.TButton", background=[("active", "#bd4157")])
         style.configure("TEntry", fieldbackground="#233146", foreground=TEXT, insertcolor=TEXT, padding=6)
         style.configure("TCombobox", fieldbackground="#233146", foreground=TEXT, padding=6)
@@ -127,15 +172,18 @@ class App:
         ttk.Label(status_row, textvariable=self.connection_var, style="Muted.TLabel").pack(side="right")
 
         book = ttk.Notebook(outer)
+        self.notebook = book
         book.pack(fill="both", expand=True)
-        self.session_tab = ttk.Frame(book, padding=20)
+        session_page = ScrollPage(book)
+        self.session_tab = session_page.content
         self.commands_tab = ttk.Frame(book, padding=20)
-        self.safety_tab = ttk.Frame(book, padding=20)
+        safety_page = ScrollPage(book)
+        self.safety_tab = safety_page.content
         self.activity_tab = ttk.Frame(book, padding=20)
         for frame, label in (
-            (self.session_tab, "Session"),
+            (session_page, "Session"),
             (self.commands_tab, "Commands"),
-            (self.safety_tab, "Safety & access"),
+            (safety_page, "Safety & access"),
             (self.activity_tab, "Activity"),
         ):
             book.add(frame, text=label)
@@ -161,7 +209,7 @@ class App:
         self.channel_entry.grid(row=2, column=1, sticky="ew", pady=4)
         ttk.Button(frame, text="Twitch app setup", command=lambda: webbrowser.open("https://dev.twitch.tv/console/apps")).grid(row=2, column=2, padx=(12, 0))
         ttk.Label(frame, text="Your Public Client ID").grid(row=3, column=0, sticky="w")
-        self.client_entry = ttk.Entry(frame, textvariable=self.client_id_var, show="•")
+        self.client_entry = ttk.Entry(frame, textvariable=self.client_id_var, show="*")
         self.client_entry.grid(row=3, column=1, sticky="ew", pady=4)
         self.connect_button = ttk.Button(frame, text="Connect", command=self._connect)
         self.connect_button.grid(row=3, column=2, sticky="ew", padx=(12, 0))
@@ -218,7 +266,7 @@ class App:
         ttk.Label(top, text="Approved game commands", style="Heading.TLabel").pack(side="left")
         ttk.Button(top, text="Import profile", command=self._import_profile).pack(side="right", padx=(8, 0))
         ttk.Button(top, text="Export profile", command=self._export_profile).pack(side="right")
-        ttk.Label(frame, text="One exact command → one short key press. No chat arguments, scripts, mouse input, or key combinations.", style="Muted.TLabel", wraplength=990).pack(anchor="w", pady=(0, 12))
+        ttk.Label(frame, text="One exact command maps to one short key press. No chat arguments, scripts, mouse input, or key combinations.", style="Muted.TLabel", wraplength=990).pack(anchor="w", pady=(0, 12))
         self.command_tree = ttk.Treeview(frame, columns=("trigger", "key", "hold", "cooldown", "enabled"), show="headings", height=10, selectmode="browse")
         for name, title, width in (("trigger", "Chat command", 220), ("key", "Game key", 160), ("hold", "Hold (ms)", 130), ("cooldown", "Cooldown (ms)", 160), ("enabled", "Enabled", 100)):
             self.command_tree.heading(name, text=title)
@@ -246,11 +294,11 @@ class App:
         ttk.Combobox(frame, textvariable=self.audience_var, state="readonly", values=tuple(AUDIENCES)).grid(row=2, column=1, sticky="ew", pady=5)
         ttk.Label(frame, text="Moderators + broadcaster by default", style="Muted.TLabel").grid(row=2, column=2, sticky="w", padx=(16, 0))
         for row, (field, label, hint) in enumerate((
-            ("global_cooldown_ms", "Between any commands (ms)", "100–60,000"),
-            ("viewer_cooldown_ms", "Per viewer cooldown (ms)", "250–60,000"),
-            ("max_actions_per_minute", "Maximum actions / minute", "1–300"),
-            ("queue_size", "Maximum queued actions", "1–8"),
-            ("queue_ttl_ms", "Discard queued input after (ms)", "100–750"),
+            ("global_cooldown_ms", "Between any commands (ms)", "100-60,000"),
+            ("viewer_cooldown_ms", "Per viewer cooldown (ms)", "250-60,000"),
+            ("max_actions_per_minute", "Maximum actions / minute", "1-300"),
+            ("queue_size", "Maximum queued actions", "1-8"),
+            ("queue_ttl_ms", "Discard queued input after (ms)", "100-750"),
         ), start=3):
             var = tk.StringVar()
             self.limit_vars[field] = var
@@ -259,11 +307,8 @@ class App:
         self._field(frame, 9, "Blocked Twitch user IDs", self.blocked_var, "Blocked IDs always win")
         ttk.Label(frame, text="Allow lists further restrict the selected audience. Names typed into chat cannot grant roles.", style="Muted.TLabel", wraplength=950).grid(row=10, column=0, columnspan=3, sticky="w", pady=(8, 8))
         ttk.Button(frame, text="Apply safety settings", style="Accent.TButton", command=self._apply_profile).grid(row=11, column=0, sticky="w", pady=8)
-        ttk.Separator(frame).grid(row=12, column=0, columnspan=3, sticky="ew", pady=14)
-        ttk.Label(frame, text="Local safety checks", style="Heading.TLabel").grid(row=13, column=0, columnspan=3, sticky="w")
-        self.safety_var = tk.StringVar(value="Checking local input safety…")
-        ttk.Label(frame, textvariable=self.safety_var, style="Muted.TLabel", wraplength=960).grid(row=14, column=0, columnspan=3, sticky="w", pady=(8, 0))
-        ttk.Label(frame, text="No automatic resume. No administrator mode. No general desktop automation. No account data saved.", style="Muted.TLabel", wraplength=960).grid(row=15, column=0, columnspan=3, sticky="w", pady=(8, 0))
+        self.safety_var = tk.StringVar(value="Checking local input safety...")
+        ttk.Label(frame, textvariable=self.safety_var, style="Muted.TLabel", wraplength=960).grid(row=12, column=0, columnspan=3, sticky="w", pady=(8, 0))
         for var in (self.profile_name, self.audience_var, self.allowed_var, self.blocked_var, *self.limit_vars.values()):
             var.trace_add("write", self._profile_edited)
 
@@ -278,7 +323,7 @@ class App:
         ttk.Label(self.activity_tab, text="A bounded, in-memory log of approved commands and reasons. Raw chat, sign-in codes, and tokens are never logged.", style="Muted.TLabel", wraplength=980).pack(anchor="w", pady=(5, 12))
         frame = ttk.Frame(self.activity_tab)
         frame.pack(fill="both", expand=True)
-        self.log = tk.Text(frame, bg=PANEL, fg=TEXT, insertbackground=TEXT, relief="flat", wrap="word", font=("Consolas", 10), height=15, state="disabled", padx=12, pady=12)
+        self.log = tk.Text(frame, bg=PANEL, fg=TEXT, insertbackground=TEXT, relief="flat", wrap="word", font=(self._mono_family, 10), height=15, state="disabled", padx=12, pady=12)
         scroll = ttk.Scrollbar(frame, command=self.log.yview)
         self.log.configure(yscrollcommand=scroll.set)
         scroll.pack(side="right", fill="y")
@@ -453,7 +498,7 @@ class App:
         ttk.Label(body, text="Keep this window off your stream", style="Heading.TLabel").pack(anchor="w")
         ttk.Label(body, text="Open Twitch activation in your browser, sign in to your channel, and enter this temporary code:", wraplength=440, style="Muted.TLabel").pack(anchor="w", pady=(12, 16))
         self._device_value = tk.StringVar(value=code)
-        ttk.Label(body, textvariable=self._device_value, font=("Consolas", 24, "bold"), foreground=ACCENT).pack(anchor="w")
+        ttk.Label(body, textvariable=self._device_value, font=(self._mono_family, 24, "bold"), foreground=ACCENT).pack(anchor="w")
         ttk.Button(body, text="Open Twitch activation", style="Accent.TButton", command=lambda: webbrowser.open(ACTIVATE_URL)).pack(anchor="w", pady=(20, 8))
         ttk.Button(body, text="Cancel sign-in", command=self._disconnect).pack(anchor="w")
 
@@ -606,8 +651,8 @@ class App:
         self._field(body, 0, "Exact chat command", trigger, "Example: !jump")
         ttk.Label(body, text="Game key").grid(row=1, column=0, sticky="w")
         ttk.Combobox(body, textvariable=key, values=tuple(sorted(SAFE_KEYS)), state="readonly").grid(row=1, column=1, sticky="ew", pady=5)
-        self._field(body, 2, "Hold (ms)", hold, "10–450")
-        self._field(body, 3, "Command cooldown (ms)", cooldown, "0–60,000")
+        self._field(body, 2, "Hold (ms)", hold, "10-450")
+        self._field(body, 3, "Command cooldown (ms)", cooldown, "0-60,000")
         ttk.Checkbutton(body, text="Enabled", variable=enabled).grid(row=4, column=1, sticky="w")
 
         def save() -> None:
@@ -621,7 +666,7 @@ class App:
                 profile = Profile.from_dict(data)
                 self.engine.set_profile(profile)
             except (ValueError, TypeError):
-                messagebox.showerror("Invalid command", "Use a unique !command, an allowed game key, a 10–450 ms hold, and a 0–60,000 ms cooldown. Maximum 64 commands.", parent=dialog)
+                messagebox.showerror("Invalid command", "Use a unique !command, an allowed game key, a 10-450 ms hold, and a 0-60,000 ms cooldown. Maximum 64 commands.", parent=dialog)
                 # Rebuild next attempt from the original profile, never a failed mutation.
                 data["commands"] = self._profile.to_dict()["commands"]
                 return
