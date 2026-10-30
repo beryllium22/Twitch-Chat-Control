@@ -18,12 +18,14 @@ Linux and macOS support the offline preview and automated tests; native game inp
 
 ## First session
 
-1. Open **Controls & commands**. Edit the starter controls or choose **Blank**, **WASD movement**, or **Arrow-key movement** under **New from**, then click **New profile**. Configure your mappings and click **Apply**.
-2. Select a mapping and click **Preview** to check it without sending keys. No Twitch account or game is needed. This leaves the connected-chat engine disarmed in Preview mode. Review **Safety & access**; new profiles allow moderators and the broadcaster by default.
-3. Register your own Twitch **Public** application and enter its Client ID and your channel name in this app. See [Twitch setup](docs/TWITCH_SETUP.md). No client secret is needed or accepted.
-4. Select **Connect**, complete Twitch's device sign-in in your browser, and keep the sign-in code off your stream. Authorization is kept in process memory only.
-5. On **Session**, select the exact window of a game running as a regular user. Choose **Live game input · Windows**, acknowledge the game focus limitation, and click **Arm live · 3 seconds**. Focus the game before the countdown ends.
-6. Press **F8** at any time to stop. Returning to another window, losing the connection, or changing the profile also disarms controls. You must arm again locally.
+1. Start on **Session** with **Preview · no keyboard input** selected. Click **Start preview** in the bottom bar, choose `!jump` under **Try a chat command**, and click **Try command**. No Twitch account or game is needed.
+2. Use **Edit commands** to make the starter controls your own. In **Controls & commands**, choose a **Blank**, **WASD movement**, or **Arrow-key movement** starting profile, or edit the current mappings. Click **Apply command**, then **Save profile**.
+3. Use **Who can play?** to review **Safety & access**. The default is **Moderators + you (recommended)**. Start with trusted participants and a comfortable command pace.
+4. When ready, select **Live game control · Windows** on **Session**. Twitch and game setup appear. Supply your own Public Client ID and channel, then select **Connect Twitch**. See [Twitch setup](docs/TWITCH_SETUP.md); no client secret is needed. Keep the temporary sign-in code off your stream.
+5. Open a game as a regular user, choose **Refresh windows**, and select its exact window. Read and check **I understand when to pause**. Click **Arm game control · 3 s** in the bottom bar, then focus the game before the countdown ends.
+6. Use **Pause** or **F8** to stop. Losing game focus, disconnecting, or changing settings also stops control. Starting again always requires a local action.
+
+The bottom bar stays visible on every tab. It explains what is ready or missing and offers a link to the next setup step. **STOP ALL · F8** remains available at the top. To test actual chat without game input, stay in Preview and choose **Connect Twitch to test real chat...**.
 
 ## Safety boundaries
 
@@ -36,13 +38,17 @@ Linux and macOS support the offline preview and automated tests; native game inp
 
 **Windows input is not a sandbox.** `SendInput` targets the current desktop input stream. There is a small foreground-switch race, and this app cannot distinguish gameplay from a text box or console inside the game. Pause before opening chat, console, overlays, purchases, or sensitive menus. A deliberate viewer can still take harmful actions *within the allowed game controls*. Use a disposable game/save for initial testing. Some games and anti-cheat systems reject synthetic input; this app does not bypass them. Read the full [security model](docs/SECURITY.md).
 
-## Profiles
+## Profiles and everyday controls
 
-Configure command mappings in **Controls & commands**; no JSON editing is required. Select a row to edit its exact chat command, game key, hold duration, cooldown, and enabled state. **New**, **Duplicate**, **Remove**, and **Disable / enable** manage mappings. Choose a key from the allowed-key picker or use **Press a key** while the app has focus. Capture accepts only an unmodified letter, digit, arrow, or Space; Escape cancels and F8 still stops control.
+Configure mappings in **Controls & commands**; no JSON editing is required. **New command**, **Duplicate**, **Remove**, and **Enable this command** manage the list. Choose a **Game key** or use **Press a key** while the app has focus. Capture accepts only an unmodified letter, digit, arrow, or Space; **Cancel** or Escape ends capture and F8 stops control.
 
-**Apply** updates the current profile in memory. **Save profile** writes commands and safety settings to a profile file; **Save as...** creates a separate file and **Open...** loads one. The app prompts before replacing or closing a profile with unsaved changes. Draft changes disarm controls immediately. Credentials, authorization, selected windows, and armed state are never saved.
+**Apply command** updates the current profile in memory. **Save profile** writes it to disk; **Save a copy...** chooses another file and **Open profile...** loads one. The app keeps applied changes separate from unsaved drafts and prompts before replacing or closing an edited profile. Invalid fields remain available for correction. Credentials, authorization, selected windows, and armed state are never saved.
 
-The editor and imported JSON use the same strict validation. See the [GUI profile guide](docs/PROFILES.md) for templates, preview behavior, and field limits.
+Use **Ctrl+S** to save, **Ctrl+Shift+S** to save a copy, **Ctrl+O** to open, and **Ctrl+1–4** or **Ctrl+Tab** to change tabs. Keyboard focus scrolls fields into view. No shortcut arms game input. Scrolling over a setting moves the page without accidentally changing its value; the command list and Activity scroll independently.
+
+**Activity** shows the latest 200 approved events in plain language. New events do not pull you back to the bottom while you read older entries. Status updates and command-list refreshes avoid repainting unchanged content.
+
+The editor and imported JSON use the same strict validation. See the [GUI profile guide](docs/PROFILES.md) for templates, keyboard navigation, preview behavior, and field limits.
 
 ## Development and Windows build
 

@@ -251,7 +251,7 @@ def test_mapping_and_safety_drafts_apply_atomically(gui):
     assert app.engine.profile == original
     assert editor.dirty
     assert editor.trigger_var.get() == "!walk"
-    assert "global cooldown" in gui.messages[-1][1]
+    assert "Between commands (ms)" in gui.messages[-1][1]
 
     app.limit_vars["global_cooldown_ms"].set("500")
     assert editor.apply_pending()

@@ -216,7 +216,7 @@ def test_preview_simulator_runs_through_policy_without_native_keys(gui):
     assert app.engine.snapshot().accepted == 1
     app.engine.tick()
     app._pump()
-    assert "would_tap" in app.log.get("1.0", "end")
+    assert "No keyboard input was sent." in app.log.get("1.0", "end")
     assert not any(event[0] in {"down", "up"} for event in gui.backend.events)
     assert not gui.clients
 
@@ -264,7 +264,7 @@ def test_old_connection_callbacks_cannot_touch_a_new_session(gui):
     current.on_chat(chat(gui, "current-chat"))
     assert app.engine.snapshot().accepted == 1
     app._pump()
-    assert app.connection_var.get() == "Twitch: connected"
+    assert app.connection_var.get() == "Twitch connected"
     assert app._device_dialog is None
 
 

@@ -11,7 +11,6 @@ import tkinter.font as tkfont
 import uuid
 import webbrowser
 from dataclasses import replace
-from datetime import datetime
 from pathlib import Path
 from tkinter import filedialog, messagebox, ttk
 from typing import Any, Callable
@@ -19,17 +18,38 @@ from typing import Any, Callable
 from . import __version__
 from .control_editor import CommandEditor
 from .engine import SafetyEngine
-from .models import AUDIENCES, Command, Profile, ProfileError
+from .models import Command, Profile, ProfileError
 from .presets import PROFILE_TEMPLATES, PreviewBackend, new_profile
 from .profile_io import load_profile, save_profile
+from .session_ui import Readiness, reason_text, session_readiness
 from .twitch import ACTIVATE_URL, ChatMessage, TwitchClient
+from .ui_support import (
+    append_log_lines,
+    clear_log,
+    configure_if_changed,
+    install_page_wheel_routing,
+    set_enabled,
+    set_var_if_changed,
+)
 from .windows import WindowsBackend
 
 BG = "#101722"
 PANEL = "#182334"
 TEXT = "#edf2f8"
-MUTED = "#a6b8cb"
-ACCENT = "#65e0c1"
+MUTED = "#b1bfd1"
+ACCENT = "#9ac6ff"
+BORDER = "#35465f"
+CONTROL_BORDER = "#7286a3"
+
+AUDIENCE_LABELS = {
+    "moderator": "Moderators + you (recommended)",
+    "broadcaster": "Only you",
+    "subscriber": "Subscribers + moderators + you",
+    "vip": "VIPs + moderators + you",
+    "everyone": "Everyone in chat",
+}
+ROLE_LABELS = {"viewer": "Viewer", "subscriber": "Subscriber", "vip": "VIP",
+               "moderator": "Moderator", "broadcaster": "Broadcaster (you)"}
 
 
 class ScrollPage(ttk.Frame):
@@ -42,36 +62,38 @@ class ScrollPage(ttk.Frame):
         self.canvas.configure(yscrollcommand=scroll.set)
         scroll.pack(side="right", fill="y")
         self.canvas.pack(side="left", fill="both", expand=True)
-        self.content = ttk.Frame(self.canvas, padding=20)
+        self.content = ttk.Frame(self.canvas, padding=16)
         self._window = self.canvas.create_window((0, 0), window=self.content, anchor="nw")
         self.content.bind("<Configure>", self._resize_content)
         self.canvas.bind("<Configure>", self._resize_canvas)
-        self.bind_all("<MouseWheel>", self._wheel, add="+")
-        self.bind_all("<Button-4>", self._wheel, add="+")
-        self.bind_all("<Button-5>", self._wheel, add="+")
+
+    def install_navigation(self) -> None:
+        self._wheel_router = install_page_wheel_routing(self, self.canvas, self.content)
+        pending = [self.content]
+        while pending:
+            widget = pending.pop()
+            widget.bind("<FocusIn>", lambda event: self.reveal_widget(event.widget), add="+")
+            pending.extend(widget.winfo_children())
+
+    def reveal_widget(self, widget: tk.Widget) -> None:
+        if not self.winfo_ismapped() or not widget.winfo_ismapped():
+            return
+        self.update_idletasks()
+        top = widget.winfo_rooty() - self.content.winfo_rooty()
+        bottom = top + widget.winfo_height()
+        visible_top = self.canvas.canvasy(0)
+        visible_height = self.canvas.winfo_height()
+        total = max(1, self.content.winfo_height())
+        if top < visible_top + 8:
+            self.canvas.yview_moveto(max(0, top - 12) / total)
+        elif bottom > visible_top + visible_height - 8:
+            self.canvas.yview_moveto(max(0, bottom + 12 - visible_height) / total)
 
     def _resize_content(self, _event: Any) -> None:
         self.canvas.configure(scrollregion=self.canvas.bbox("all"))
 
     def _resize_canvas(self, event: Any) -> None:
         self.canvas.itemconfigure(self._window, width=event.width)
-
-    def _wheel(self, event: Any) -> None:
-        if not self.winfo_ismapped() or isinstance(event.widget, ttk.Combobox):
-            return
-        x, y = self.winfo_rootx(), self.winfo_rooty()
-        if not (x <= event.x_root < x + self.winfo_width() and y <= event.y_root < y + self.winfo_height()):
-            return
-        if self.content.winfo_reqheight() <= self.canvas.winfo_height():
-            return
-        if getattr(event, "num", 0) == 4:
-            direction = -1
-        elif getattr(event, "num", 0) == 5:
-            direction = 1
-        else:
-            direction = -1 if event.delta > 0 else 1
-        self.canvas.yview_scroll(direction * 3, "units")
-
 
 class App:
     def __init__(
@@ -98,16 +120,20 @@ class App:
         self.profile_name = tk.StringVar(master=root)
         self.notice_var = tk.StringVar(master=root)
         self._windows: list[Any] = []
+        self._field_groups: dict[ttk.Frame, list[tuple[int, ttk.Label, ttk.Entry, ttk.Label]]] = {}
         self._device_dialog: tk.Toplevel | None = None
         self._device_value: tk.StringVar | None = None
         self._loading = True
         self._dirty = False
         self._worker: threading.Thread | None = None
+        self._pump_id: str | None = None
         self.engine = SafetyEngine(self.backend, on_event=lambda event: self._post("decision", event))
 
         self.root.title(f"Twitch Chat Control · {__version__}")
-        self.root.geometry("1140x820")
-        self.root.minsize(980, 740)
+        width = min(1180, max(940, self.root.winfo_screenwidth() - 80))
+        height = min(900, max(640, self.root.winfo_screenheight() - 80))
+        self.root.geometry(f"{width}x{height}")
+        self.root.minsize(940, 640)
         self.root.configure(bg=BG)
         self.root.protocol("WM_DELETE_WINDOW", self.close)
         self.root.bind("<F8>", lambda _event: self._panic())
@@ -115,6 +141,7 @@ class App:
         self._build()
         self._show_profile(self._profile)
         self._loading = False
+        self._refresh_session_ui()
         if start_workers:
             try:
                 self.backend.start_safety_monitor(
@@ -125,8 +152,8 @@ class App:
                 self._post("notice", "Emergency hotkey unavailable. Live input is disabled.")
             self._worker = threading.Thread(target=self._run_engine, name="input-policy", daemon=True)
             self._worker.start()
-        self.root.after(50, self._pump)
-        self._post("notice", "Ready in preview. Review commands, then arm to try the simulator.")
+        self._pump_id = self.root.after(50, self._pump)
+        self._post("notice", "Welcome. Try the starter controls in Preview, or open Controls & commands to make them your own.")
 
     def _style(self) -> None:
         families = {name.lower() for name in tkfont.families(self.root)}
@@ -136,214 +163,422 @@ class App:
         style.theme_use("clam")
         style.configure(".", background=BG, foreground=TEXT, font=(self._font_family, 10))
         style.configure("TFrame", background=BG)
-        style.configure("Card.TFrame", background=PANEL)
+        style.configure("Card.TFrame", background=PANEL, relief="flat", borderwidth=0)
+        style.configure("Surface.TFrame", background=PANEL, bordercolor=BORDER, relief="solid", borderwidth=1)
         style.configure("TLabel", background=BG, foreground=TEXT)
         style.configure("Muted.TLabel", foreground=MUTED)
-        style.configure("Title.TLabel", font=(self._font_family, 24, "bold"))
+        style.configure("Small.TLabel", foreground=MUTED, font=(self._font_family, 9))
+        style.configure("Title.TLabel", font=(self._font_family, 21, "bold"))
         style.configure("Heading.TLabel", font=(self._font_family, 13, "bold"))
-        style.configure("Status.TLabel", foreground=ACCENT, font=(self._font_family, 12, "bold"))
-        style.configure("TButton", padding=(14, 9), background="#293a50", foreground=TEXT)
-        style.map("TButton", background=[("active", "#354b67")])
-        style.configure("Accent.TButton", background="#237f70", foreground="white")
-        style.map("Accent.TButton", background=[("active", "#299984")])
-        style.configure("Danger.TButton", background="#9b3446", foreground="white", font=(self._font_family, 11, "bold"))
-        style.map("Danger.TButton", background=[("active", "#bd4157")])
-        style.configure("TEntry", fieldbackground="#233146", foreground=TEXT, insertcolor=TEXT, padding=6)
-        style.configure("TSpinbox", fieldbackground="#233146", foreground=TEXT, insertcolor=TEXT, padding=6)
-        style.configure("TCombobox", fieldbackground="#233146", foreground=TEXT, padding=6)
-        style.map("TCombobox", fieldbackground=[("readonly", "#233146")], foreground=[("readonly", TEXT)])
-        style.configure("TNotebook", background=BG, borderwidth=0)
-        style.configure("TNotebook.Tab", padding=(18, 11), background=PANEL)
-        style.map("TNotebook.Tab", background=[("selected", "#2b4058")])
-        style.configure("Treeview", background=PANEL, fieldbackground=PANEL, foreground=TEXT, rowheight=31)
-        style.configure("Treeview.Heading", background="#26374e", foreground=TEXT, padding=7)
-        style.map("Treeview", background=[("selected", "#355c72")])
-        style.configure("TRadiobutton", padding=(0, 5))
-        style.configure("TCheckbutton", padding=(0, 5))
+        style.configure("Card.TLabel", background=PANEL)
+        style.configure("CardMuted.TLabel", background=PANEL, foreground=MUTED)
+        style.configure("CardHeading.TLabel", background=PANEL, font=(self._font_family, 12, "bold"))
+        for name, color in (("Status", ACCENT), ("Paused", MUTED), ("Live", "#ffcf80"), ("Stopped", "#ffacb8")):
+            style.configure(f"{name}.TLabel", foreground=color, font=(self._font_family, 11, "bold"))
+        style.configure("TButton", padding=(13, 8), background="#273750", foreground=TEXT,
+                        bordercolor=CONTROL_BORDER, relief="flat", focuscolor=ACCENT)
+        style.map("TButton", background=[("disabled", "#1d293c"), ("pressed", "#203955"), ("active", "#354b69")],
+                  foreground=[("disabled", "#8c9bb1")], bordercolor=[("focus", ACCENT)])
+        style.configure("Accent.TButton", background="#315fd4", foreground="white", bordercolor="#315fd4")
+        style.map("Accent.TButton", background=[("disabled", "#253858"), ("pressed", "#2447a2"), ("active", "#3d6de5")],
+                  foreground=[("disabled", "#9cabc1")], bordercolor=[("focus", "#b9d8ff")])
+        style.configure("Danger.TButton", background="#9b3148", foreground="white", bordercolor="#b3445c",
+                        font=(self._font_family, 10, "bold"))
+        style.map("Danger.TButton", background=[("pressed", "#7d263b"), ("active", "#af3953")])
+        style.configure("Link.TButton", background=BG, foreground=ACCENT, padding=(8, 6), borderwidth=0)
+        style.configure("CardLink.TButton", background=PANEL, foreground=ACCENT, padding=(8, 6), borderwidth=0)
+        for name in ("TEntry", "TSpinbox", "TCombobox"):
+            style.configure(name, fieldbackground="#202e44", foreground=TEXT, insertcolor=TEXT,
+                            bordercolor=CONTROL_BORDER, lightcolor=CONTROL_BORDER, darkcolor=CONTROL_BORDER, padding=7)
+            style.map(name, bordercolor=[("invalid", "#ffacb8"), ("focus", ACCENT)],
+                      fieldbackground=[("disabled", "#1c283a"), ("readonly", "#202e44")],
+                      foreground=[("disabled", "#8c9bb1"), ("readonly", TEXT)])
+        style.configure("TNotebook", background=BG, borderwidth=0, tabmargins=(0, 0, 0, 5))
+        style.configure("TNotebook.Tab", padding=(17, 10), background=BG, foreground=MUTED)
+        style.map("TNotebook.Tab", background=[("selected", PANEL)], foreground=[("selected", TEXT)],
+                  lightcolor=[("focus", ACCENT)])
+        style.configure("Treeview", background=PANEL, fieldbackground=PANEL, foreground=TEXT,
+                        rowheight=32, bordercolor=BORDER)
+        style.configure("Treeview.Heading", background="#25364e", foreground=TEXT, padding=7)
+        style.map("Treeview", background=[("selected", "#2c5080")], foreground=[("selected", "#ffffff")])
+        for name in ("TRadiobutton", "TCheckbutton"):
+            style.configure(name, padding=(0, 5))
+            style.configure("Card." + name, background=PANEL, padding=(0, 5))
+            style.map("Card." + name, background=[("active", PANEL)], foreground=[("disabled", "#8c9bb1")])
 
     def _build(self) -> None:
-        outer = ttk.Frame(self.root, padding=24)
+        outer = ttk.Frame(self.root, padding=(22, 16))
         outer.pack(fill="both", expand=True)
         heading = ttk.Frame(outer)
         heading.pack(fill="x")
         title = ttk.Frame(heading)
         title.pack(side="left", fill="x", expand=True)
         ttk.Label(title, text="Twitch Chat Control", style="Title.TLabel").pack(anchor="w")
-        ttk.Label(title, text="Your chat. Your game. Your rules.", style="Muted.TLabel").pack(anchor="w", pady=(4, 0))
-        ttk.Button(heading, text="STOP ALL · F8", style="Danger.TButton", command=self._panic).pack(side="right")
+        ttk.Button(heading, text="STOP ALL  ·  F8", style="Danger.TButton", command=self._panic).pack(side="right")
 
-        status_row = ttk.Frame(outer, padding=(0, 18, 0, 14))
+        status_row = ttk.Frame(outer, padding=(0, 9, 0, 9))
         status_row.pack(fill="x")
         self.state_var = tk.StringVar(value="DISARMED · PREVIEW")
-        self.connection_var = tk.StringVar(value="Twitch: disconnected")
-        ttk.Label(status_row, textvariable=self.state_var, style="Status.TLabel").pack(side="left")
+        self.status_var = tk.StringVar(value="Paused · Preview")
+        self.connection_var = tk.StringVar(value="Twitch not connected")
+        self.status_label = ttk.Label(status_row, textvariable=self.status_var, style="Paused.TLabel")
+        self.status_label.pack(side="left")
         ttk.Label(status_row, textvariable=self.connection_var, style="Muted.TLabel").pack(side="right")
 
-        book = ttk.Notebook(outer)
-        self.notebook = book
-        book.pack(fill="both", expand=True)
-        session_page = ScrollPage(book)
-        self.session_tab = session_page.content
-        commands_page = ScrollPage(book)
-        self.commands_tab = commands_page.content
-        safety_page = ScrollPage(book)
-        self.safety_tab = safety_page.content
-        self.activity_tab = ttk.Frame(book, padding=20)
-        for frame, label in (
-            (session_page, "Session"),
-            (commands_page, "Controls & commands"),
-            (safety_page, "Safety & access"),
-            (self.activity_tab, "Activity"),
-        ):
-            book.add(frame, text=label)
+        self.notebook = ttk.Notebook(outer)
+        self.notebook.pack(fill="both", expand=True)
+        self._pages = [ScrollPage(self.notebook) for _ in range(3)]
+        self.session_tab, self.commands_tab, self.safety_tab = (page.content for page in self._pages)
+        self.activity_tab = ttk.Frame(self.notebook, padding=16)
+        for frame, label in zip((*self._pages, self.activity_tab),
+                                ("Session", "Controls & commands", "Safety & access", "Activity"), strict=True):
+            self.notebook.add(frame, text=label)
         self._build_session()
         self._build_commands()
         self._build_safety()
         self._build_activity()
-        book.bind("<<NotebookTabChanged>>", lambda _event: self.command_editor.cancel_capture())
+        self.notebook.enable_traversal()
+        self.notebook.bind("<<NotebookTabChanged>>", lambda _event: self.command_editor.cancel_capture())
 
-        footer = ttk.Frame(outer, padding=(0, 12, 0, 0))
-        footer.pack(fill="x")
-        ttk.Label(footer, textvariable=self.notice_var, style="Muted.TLabel", wraplength=1030).pack(anchor="w")
+        footer = ttk.Frame(outer, style="Surface.TFrame", padding=(14, 10))
+        footer.pack(fill="x", pady=(12, 0))
+        footer.columnconfigure(0, weight=1)
+        self.readiness_var = tk.StringVar()
+        self.readiness_detail_var = tk.StringVar()
+        self.readiness_heading = ttk.Label(footer, textvariable=self.readiness_var, style="CardHeading.TLabel", wraplength=400)
+        self.readiness_heading.grid(row=0, column=0, sticky="w")
+        self.readiness_label = ttk.Label(footer, textvariable=self.readiness_detail_var, style="CardMuted.TLabel", wraplength=600, justify="left")
+        self.readiness_label.grid(row=1, column=0, columnspan=2, sticky="w", pady=(4, 0))
+        self.next_step_button = ttk.Button(footer, text="Review commands", style="CardLink.TButton", command=self._next_step)
+        self.next_step_button.grid(row=0, column=1, padx=(8, 16), sticky="e")
+        actions = ttk.Frame(footer, style="Card.TFrame")
+        actions.grid(row=0, column=2, rowspan=2, sticky="e")
+        self.arm_button = ttk.Button(actions, text="Start preview", style="Accent.TButton", command=self._arm)
+        self.arm_button.pack(side="left", padx=(0, 8))
+        self.pause_button = ttk.Button(actions, text="Pause", command=self._pause)
+        self.pause_button.pack(side="left")
+        self.notice_label = ttk.Label(outer, textvariable=self.notice_var, style="Small.TLabel", wraplength=1080)
+        self.notice_label.pack(anchor="w", pady=(8, 0), fill="x")
+        def fit_readiness(event: Any) -> None:
+            width = max(280, event.width - actions.winfo_reqwidth() - 48)
+            configure_if_changed(self.readiness_label, wraplength=width)
+            configure_if_changed(self.readiness_heading, wraplength=max(180, width - self.next_step_button.winfo_reqwidth() - 24))
+        footer.bind("<Configure>", fit_readiness)
+        outer.bind("<Configure>", lambda event: configure_if_changed(self.notice_label, wraplength=max(400, event.width - 44)))
+
+        for page in self._pages:
+            page.install_navigation()
+        for sequence, action in (("<Control-s>", "save"), ("<Control-Shift-S>", "save_as"), ("<Control-o>", "open")):
+            self.root.bind(sequence, lambda _event, selected=action: self._shortcut(selected), add="+")
+        for index in range(4):
+            self.root.bind(f"<Control-Key-{index + 1}>", lambda _event, selected=index: self._shortcut(f"tab_{selected}"), add="+")
+
+    def _card(self, parent: tk.Misc, title: str, subtitle: str = "") -> ttk.Frame:
+        card = ttk.Frame(parent, style="Surface.TFrame", padding=16)
+        ttk.Label(card, text=title, style="CardHeading.TLabel").pack(anchor="w")
+        if subtitle:
+            note = ttk.Label(card, text=subtitle, style="CardMuted.TLabel", wraplength=410, justify="left")
+            note.pack(anchor="w", fill="x", pady=(4, 12))
+            card.bind("<Configure>", lambda event: configure_if_changed(note, wraplength=max(260, event.width - 34)))
+        return card
+
+    def _wrapped_label(self, parent: tk.Misc, **options: Any) -> ttk.Label:
+        options.setdefault("wraplength", 400)
+        label = ttk.Label(parent, **options)
+        parent.bind("<Configure>", lambda event: configure_if_changed(label, wraplength=max(160, event.width - 40)), add="+")
+        return label
 
     def _build_session(self) -> None:
         frame = self.session_tab
-        frame.columnconfigure(1, weight=1)
-        ttk.Label(frame, text="1  Connect your channel", style="Heading.TLabel").grid(row=0, column=0, columnspan=3, sticky="w")
-        ttk.Label(frame, text="Authorize your own channel with a Twitch Public application. No client secret.", style="Muted.TLabel").grid(row=1, column=0, columnspan=3, sticky="w", pady=(3, 12))
-        self.channel_var = tk.StringVar()
-        self.client_id_var = tk.StringVar()
-        ttk.Label(frame, text="Channel name or URL").grid(row=2, column=0, sticky="w", padx=(0, 14))
-        self.channel_entry = ttk.Entry(frame, textvariable=self.channel_var)
-        self.channel_entry.grid(row=2, column=1, sticky="ew", pady=4)
-        ttk.Button(frame, text="Twitch app setup", command=lambda: webbrowser.open("https://dev.twitch.tv/console/apps")).grid(row=2, column=2, padx=(12, 0))
-        ttk.Label(frame, text="Your Public Client ID").grid(row=3, column=0, sticky="w")
-        self.client_entry = ttk.Entry(frame, textvariable=self.client_id_var, show="*")
-        self.client_entry.grid(row=3, column=1, sticky="ew", pady=4)
-        self.connect_button = ttk.Button(frame, text="Connect", command=self._connect)
-        self.connect_button.grid(row=3, column=2, sticky="ew", padx=(12, 0))
-        ttk.Label(frame, text="Authorization lives in memory and is discarded when you disconnect or quit.", style="Muted.TLabel").grid(row=4, column=0, columnspan=3, sticky="w", pady=(4, 17))
-
-        ttk.Separator(frame).grid(row=5, column=0, columnspan=3, sticky="ew", pady=(0, 15))
-        ttk.Label(frame, text="2  Choose a game window", style="Heading.TLabel").grid(row=6, column=0, columnspan=3, sticky="w")
-        self.window_var = tk.StringVar(value="Select a game window for live input")
-        self.window_combo = ttk.Combobox(frame, textvariable=self.window_var, state="readonly")
-        self.window_combo.grid(row=7, column=0, columnspan=2, sticky="ew", pady=(10, 4))
-        self.window_combo.bind("<<ComboboxSelected>>", self._select_window)
-        ttk.Button(frame, text="Refresh windows", command=self._refresh_windows).grid(row=7, column=2, sticky="ew", padx=(12, 0))
-        ttk.Label(frame, text="Controls stop when the selected game loses focus. Browsers and terminals are excluded.", style="Muted.TLabel").grid(row=8, column=0, columnspan=3, sticky="w", pady=(4, 17))
-
-        ttk.Separator(frame).grid(row=9, column=0, columnspan=3, sticky="ew", pady=(0, 15))
-        ttk.Label(frame, text="3  Review, then arm", style="Heading.TLabel").grid(row=10, column=0, columnspan=3, sticky="w")
+        frame.columnconfigure((0, 1), weight=1, uniform="session")
+        ttk.Label(frame, text="Make chat part of your game", style="Heading.TLabel").grid(row=0, column=0, columnspan=2, sticky="w")
+        ttk.Label(frame, text="Try your controls in Preview first. Connect your channel when you are ready.", style="Muted.TLabel").grid(row=1, column=0, columnspan=2, sticky="w", pady=(4, 16))
+        mode_card = self._card(frame, "1  Choose your mode", "Preview is a safe place to test: it never presses game keys.")
+        mode_card.grid(row=2, column=0, sticky="nsew", padx=(0, 7))
         self.mode_var = tk.StringVar(value="preview")
-        modes = ttk.Frame(frame)
-        modes.grid(row=11, column=0, columnspan=3, sticky="w", pady=(5, 0))
-        ttk.Radiobutton(modes, text="Preview · no input", variable=self.mode_var, value="preview", command=self._mode_changed).pack(side="left", padx=(0, 30))
-        self.live_radio = ttk.Radiobutton(modes, text="Live game input · Windows", variable=self.mode_var, value="live", command=self._mode_changed)
-        self.live_radio.pack(side="left")
+        ttk.Radiobutton(mode_card, text="Preview · no keyboard input", style="Card.TRadiobutton", variable=self.mode_var, value="preview", command=self._mode_changed).pack(anchor="w")
+        self.live_radio = ttk.Radiobutton(mode_card, text="Live game control · Windows", style="Card.TRadiobutton", variable=self.mode_var, value="live", command=self._mode_changed)
+        self.live_radio.pack(anchor="w")
         if not self.backend.available:
             self.live_radio.state(["disabled"])
-        self.ack_var = tk.BooleanVar(value=False)
-        ttk.Checkbutton(
-            frame, variable=self.ack_var,
-            text="I will pause before opening game chat, console, overlays, or sensitive menus.",
-            command=self._ack_changed,
-        ).grid(row=12, column=0, columnspan=3, sticky="w")
-        controls = ttk.Frame(frame)
-        controls.grid(row=13, column=0, columnspan=3, sticky="ew", pady=(6, 0))
-        self.arm_button = ttk.Button(controls, text="Arm preview", style="Accent.TButton", command=self._arm)
-        self.arm_button.pack(side="left", padx=(0, 10))
-        ttk.Button(controls, text="Disarm", command=lambda: self.engine.disarm("stopped_locally")).pack(side="left")
-        ttk.Label(controls, text="Live arming gives you 3 seconds to focus your game.", style="Muted.TLabel").pack(side="left", padx=(18, 0))
+            ttk.Label(mode_card, text="Live control is available in the Windows app.", style="CardMuted.TLabel").pack(anchor="w", pady=(5, 0))
 
-        simulator = ttk.Frame(frame, padding=(0, 17, 0, 0))
-        simulator.grid(row=14, column=0, columnspan=3, sticky="ew")
-        ttk.Label(simulator, text="Preview command").pack(side="left", padx=(0, 10))
+        profile_card = self._card(frame, "2  Review your controls", "Choose what chat can do and who can take part.")
+        profile_card.grid(row=2, column=1, sticky="nsew", padx=(7, 0))
+        self.profile_summary_var = tk.StringVar()
+        self._wrapped_label(profile_card, textvariable=self.profile_summary_var, style="Card.TLabel", wraplength=410).pack(anchor="w", pady=(0, 8))
+        links = ttk.Frame(profile_card, style="Card.TFrame")
+        links.pack(anchor="w")
+        ttk.Button(links, text="Edit commands", command=lambda: self._go_to_step("commands")).pack(side="left", padx=(0, 8))
+        ttk.Button(links, text="Who can play?", command=lambda: self._go_to_step("safety")).pack(side="left")
+
+        self.preview_card = self._card(frame, "3  Try a chat command", "Start preview using the button below, then send a test command here.")
+        self.preview_card.grid(row=3, column=0, columnspan=2, sticky="ew", pady=(14, 0))
+        form = ttk.Frame(self.preview_card, style="Card.TFrame")
+        form.pack(fill="x")
+        form.columnconfigure(0, weight=1)
         self.sim_var = tk.StringVar(value="!jump")
-        self.sim_entry = ttk.Entry(simulator, textvariable=self.sim_var, width=18)
-        self.sim_entry.pack(side="left", padx=(0, 8))
         self.sim_role = tk.StringVar(value="moderator")
-        ttk.Combobox(simulator, textvariable=self.sim_role, state="readonly", width=13, values=("viewer", "subscriber", "vip", "moderator", "broadcaster")).pack(side="left", padx=(0, 8))
-        self.sim_button = ttk.Button(simulator, text="Try command", command=self._simulate)
-        self.sim_button.pack(side="left")
+        self.sim_role_label = tk.StringVar(value=ROLE_LABELS["moderator"])
+        ttk.Label(form, text="Chat command", style="Card.TLabel").grid(row=0, column=0, sticky="w")
+        ttk.Label(form, text="Try as", style="Card.TLabel").grid(row=0, column=1, sticky="w")
+        self.sim_entry = ttk.Combobox(form, textvariable=self.sim_var, width=24)
+        self.sim_entry.grid(row=1, column=0, sticky="ew", padx=(0, 12), pady=(4, 0))
+        roles = ttk.Combobox(form, textvariable=self.sim_role_label, state="readonly", width=19, values=tuple(ROLE_LABELS.values()))
+        roles.grid(row=1, column=1, padx=(0, 12), pady=(4, 0))
+        roles.bind("<<ComboboxSelected>>", lambda _event: self.sim_role.set(next(key for key, value in ROLE_LABELS.items() if value == self.sim_role_label.get())))
+        self.sim_role.trace_add("write", lambda *_args: set_var_if_changed(self.sim_role_label, ROLE_LABELS.get(self.sim_role.get(), "Viewer")))
+        self.sim_button = ttk.Button(form, text="Try command", command=self._simulate)
+        self.sim_button.grid(row=1, column=2, pady=(4, 0))
+        self.sim_result_var = tk.StringVar(value="Start Preview to try a command. Nothing will be sent to your keyboard.")
+        self._wrapped_label(self.preview_card, textvariable=self.sim_result_var, style="CardMuted.TLabel", wraplength=900).pack(anchor="w", pady=(10, 0))
         self.sim_entry.bind("<Return>", lambda _event: self._simulate())
+        self.connection_setup_var = tk.BooleanVar(value=False)
+        self.connection_setup_button = ttk.Button(self.preview_card, text="Connect Twitch to test real chat...", style="CardLink.TButton", command=self._toggle_connection_setup)
+        self.connection_setup_button.pack(anchor="w", pady=(8, 0))
+
+        self.connection_card = self._card(frame, "Connect your Twitch channel", "Use your own Twitch Public application. Your sign-in stays in memory for this session.")
+        self.connection_card.grid(row=4, column=0, sticky="nsew", pady=(14, 0), padx=(0, 7))
+        self.channel_var = tk.StringVar()
+        self.client_id_var = tk.StringVar()
+        ttk.Label(self.connection_card, text="Channel name or Twitch URL", style="Card.TLabel").pack(anchor="w")
+        self.channel_entry = ttk.Entry(self.connection_card, textvariable=self.channel_var)
+        self.channel_entry.pack(fill="x", pady=(4, 10))
+        ttk.Label(self.connection_card, text="Your Public Client ID", style="Card.TLabel").pack(anchor="w")
+        self.client_entry = ttk.Entry(self.connection_card, textvariable=self.client_id_var, show="*")
+        self.client_entry.pack(fill="x", pady=(4, 8))
+        buttons = ttk.Frame(self.connection_card, style="Card.TFrame")
+        buttons.pack(fill="x")
+        self.connect_button = ttk.Button(buttons, text="Connect Twitch", command=self._connect)
+        self.connect_button.pack(side="left", padx=(0, 8))
+        ttk.Button(buttons, text="Get a Client ID", style="CardLink.TButton", command=lambda: webbrowser.open("https://dev.twitch.tv/console/apps")).pack(side="left")
+        self._wrapped_label(self.connection_card, text="No client secret is needed. Sign in as your channel's owner.", style="CardMuted.TLabel", wraplength=410).pack(anchor="w", pady=(10, 0))
+
+        self.game_card = self._card(frame, "Choose a game window", "Run your game without administrator rights, then refresh and choose its exact window.")
+        self.game_card.grid(row=4, column=1, sticky="nsew", pady=(14, 0), padx=(7, 0))
+        self.window_var = tk.StringVar(value="Refresh to find your game")
+        self.window_combo = ttk.Combobox(self.game_card, textvariable=self.window_var, state="readonly", width=26)
+        self.window_combo.pack(fill="x", pady=(0, 8))
+        self.window_combo.bind("<<ComboboxSelected>>", self._select_window)
+        ttk.Button(self.game_card, text="Refresh windows", command=self._refresh_windows).pack(anchor="w")
+        self.ack_var = tk.BooleanVar(value=False)
+        self.ack_check = ttk.Checkbutton(self.game_card, variable=self.ack_var, style="Card.TCheckbutton", text="I understand when to pause", command=self._ack_changed)
+        self.ack_check.pack(anchor="w", pady=(12, 0))
+        self._wrapped_label(self.game_card, text="Pause before opening game chat, consoles, overlays, purchases, or sensitive menus. Losing game focus also stops control.", style="CardMuted.TLabel", wraplength=410).pack(anchor="w", pady=(4, 0))
 
     def _build_commands(self) -> None:
         frame = self.commands_tab
         top = ttk.Frame(frame)
-        top.pack(fill="x", pady=(0, 8))
-        ttk.Label(top, text="Build your game controls", style="Heading.TLabel").pack(side="left")
-        ttk.Button(top, text="Save as...", command=lambda: self._save_profile(save_as=True)).pack(side="right", padx=(8, 0))
-        ttk.Button(top, text="Save profile", style="Accent.TButton", command=self._save_profile).pack(side="right", padx=(8, 0))
-        ttk.Button(top, text="Open...", command=self._import_profile).pack(side="right")
+        top.pack(fill="x", pady=(0, 10))
+        heading = ttk.Label(top, text="Your game, your commands", style="Heading.TLabel")
+        buttons = ttk.Frame(top)
+        ttk.Button(buttons, text="Open profile...", command=self._import_profile).pack(side="left")
+        ttk.Button(buttons, text="Save profile", style="Accent.TButton", command=self._save_profile).pack(side="left", padx=(8, 0))
+        ttk.Button(buttons, text="Save a copy...", command=lambda: self._save_profile(save_as=True)).pack(side="left", padx=(8, 0))
+        self._adaptive_toolbar(top, heading, buttons)
         row = ttk.Frame(frame)
         row.pack(fill="x", pady=(0, 7))
-        ttk.Label(row, text="Profile name").pack(side="left", padx=(0, 8))
-        ttk.Entry(row, textvariable=self.profile_name, width=24).pack(side="left", padx=(0, 18))
-        ttk.Label(row, text="New from").pack(side="left", padx=(0, 8))
+        naming = ttk.Frame(row)
+        ttk.Label(naming, text="Profile name").pack(side="left", padx=(0, 8))
+        self.profile_name_entry = ttk.Entry(naming, textvariable=self.profile_name, width=22)
+        self.profile_name_entry.pack(side="left")
+        templates = ttk.Frame(row)
+        ttk.Label(templates, text="Start from").pack(side="left", padx=(0, 8))
         self.template_var = tk.StringVar(value="Blank")
-        ttk.Combobox(row, textvariable=self.template_var, values=PROFILE_TEMPLATES, state="readonly", width=19).pack(side="left", padx=(0, 8))
-        ttk.Button(row, text="New profile", command=self._new_profile).pack(side="left")
+        ttk.Combobox(templates, textvariable=self.template_var, values=PROFILE_TEMPLATES, state="readonly", width=19).pack(side="left", padx=(0, 8))
+        ttk.Button(templates, text="New profile", command=self._new_profile).pack(side="left")
+        self._adaptive_toolbar(row, naming, templates, align="w")
         self.profile_status_var = tk.StringVar()
-        ttk.Label(frame, textvariable=self.profile_status_var, style="Muted.TLabel", wraplength=880).pack(anchor="w", pady=(0, 12))
-        self.command_editor = CommandEditor(
-            frame,
-            on_change=self._commands_changed,
-            on_edit=self._command_draft_edited,
-            on_preview=self._preview_command,
-            on_panic=self._panic,
-            on_notice=self.notice_var.set,
-        )
+        self._wrapped_label(frame, textvariable=self.profile_status_var, style="Small.TLabel", wraplength=940).pack(anchor="w", pady=(0, 12))
+        self.command_editor = CommandEditor(frame, on_change=self._commands_changed, on_edit=self._command_draft_edited,
+                                            on_preview=self._preview_command, on_panic=self._panic, on_notice=self.notice_var.set)
         self.command_editor.pack(fill="both", expand=True)
+        ttk.Label(frame, text="Ctrl+S saves your profile  ·  Ctrl+O opens a profile  ·  Ctrl+Tab switches tabs", style="Small.TLabel").pack(anchor="w", pady=(10, 0))
+
+    def _adaptive_toolbar(self, container: ttk.Frame, first: tk.Widget, second: tk.Widget, *, align: str = "e") -> None:
+        container.columnconfigure(0, weight=1 if align == "e" else 0)
+        container.columnconfigure(1, weight=0 if align == "e" else 1)
+        first.grid(row=0, column=0, sticky="w")
+        second.grid(row=0, column=1, sticky=align, padx=(16, 0))
+        stacked = False
+        def arrange(event: Any) -> None:
+            nonlocal stacked
+            next_stacked = event.width < first.winfo_reqwidth() + second.winfo_reqwidth() + 20
+            if next_stacked == stacked:
+                return
+            stacked = next_stacked
+            first.grid_configure(columnspan=2 if stacked else 1)
+            second.grid_configure(row=1 if stacked else 0, column=0 if stacked else 1,
+                                  columnspan=2 if stacked else 1, sticky="w" if stacked else align,
+                                  padx=0 if stacked else (16, 0), pady=(8, 0) if stacked else 0)
+        container.bind("<Configure>", arrange)
 
     def _build_safety(self) -> None:
         frame = self.safety_tab
-        frame.columnconfigure(1, weight=1)
-        ttk.Label(frame, text="Participation and input limits", style="Heading.TLabel").grid(row=0, column=0, columnspan=3, sticky="w", pady=(0, 10))
+        ttk.Label(frame, text="Keep the session on your terms", style="Heading.TLabel").pack(anchor="w")
+        ttk.Label(frame, text="Start with trusted viewers. You can invite more people when your controls feel right.", style="Muted.TLabel").pack(anchor="w", pady=(4, 14))
         self.audience_var = tk.StringVar()
+        self.audience_label_var = tk.StringVar()
         self.allowed_var = tk.StringVar()
         self.blocked_var = tk.StringVar()
         self.limit_vars: dict[str, tk.StringVar] = {}
-        self._field(frame, 1, "Profile name", self.profile_name)
-        ttk.Label(frame, text="Who can control").grid(row=2, column=0, sticky="w", padx=(0, 16))
-        ttk.Combobox(frame, textvariable=self.audience_var, state="readonly", values=tuple(AUDIENCES)).grid(row=2, column=1, sticky="ew", pady=5)
-        ttk.Label(frame, text="Moderators + broadcaster by default", style="Muted.TLabel").grid(row=2, column=2, sticky="w", padx=(16, 0))
+        self.safety_entries: dict[str, tk.Widget] = {}
+        audience = self._card(frame, "Who can play?", "Audience and user lists work together. A blocked viewer is always excluded.")
+        audience.pack(fill="x", pady=(0, 12))
+        self.audience_combo = ttk.Combobox(audience, textvariable=self.audience_label_var, state="readonly", values=tuple(AUDIENCE_LABELS.values()), width=38)
+        self.audience_combo.pack(anchor="w", fill="x")
+        self.audience_combo.bind("<<ComboboxSelected>>", self._audience_changed)
+        self.audience_var.trace_add("write", lambda *_args: set_var_if_changed(self.audience_label_var, AUDIENCE_LABELS.get(self.audience_var.get(), "Choose an audience")))
+        self.access_summary_var = tk.StringVar()
+        self._wrapped_label(audience, textvariable=self.access_summary_var, style="CardMuted.TLabel", wraplength=900).pack(anchor="w", pady=(8, 0))
+        pace = self._card(frame, "Set a comfortable pace", "All of these limits apply together, including each command's own cooldown.")
+        pace.pack(fill="x", pady=(0, 12))
+        fields = ttk.Frame(pace, style="Card.TFrame")
+        fields.pack(fill="x")
+        fields.columnconfigure(2, weight=1)
         for row, (field, label, hint) in enumerate((
-            ("global_cooldown_ms", "Between any commands (ms)", "100-60,000"),
-            ("viewer_cooldown_ms", "Per viewer cooldown (ms)", "250-60,000"),
-            ("max_actions_per_minute", "Maximum actions / minute", "1-300"),
-            ("queue_size", "Maximum queued actions", "1-8"),
-            ("queue_ttl_ms", "Discard queued input after (ms)", "100-750"),
-        ), start=3):
+            ("global_cooldown_ms", "Between commands (ms)", "100 to 60,000"),
+            ("viewer_cooldown_ms", "Each viewer waits (ms)", "250 to 60,000"),
+            ("max_actions_per_minute", "Actions per minute", "1 to 300"),
+        )):
             var = tk.StringVar()
             self.limit_vars[field] = var
-            self._field(frame, row, label, var, hint)
-        self._field(frame, 8, "Only these Twitch user IDs", self.allowed_var, "Optional, comma separated numeric IDs")
-        self._field(frame, 9, "Blocked Twitch user IDs", self.blocked_var, "Blocked IDs always win")
-        ttk.Label(frame, text="Allow lists further restrict the selected audience. Names typed into chat cannot grant roles.", style="Muted.TLabel", wraplength=950).grid(row=10, column=0, columnspan=3, sticky="w", pady=(8, 8))
-        ttk.Button(frame, text="Apply safety settings", style="Accent.TButton", command=self._apply_profile).grid(row=11, column=0, sticky="w", pady=8)
+            self.safety_entries[field] = self._field(fields, row, label, var, hint)
+        self.advanced_button = ttk.Button(frame, text="Show advanced settings", command=self._toggle_advanced)
+        self.advanced_button.pack(anchor="w", pady=(0, 8))
+        self.advanced_frame = self._card(frame, "Advanced limits & viewer lists", "These settings still apply while this section is collapsed.")
+        self._advanced_open = False
+        advanced_fields = ttk.Frame(self.advanced_frame, style="Card.TFrame")
+        advanced_fields.pack(fill="x")
+        advanced_fields.columnconfigure(2, weight=1)
+        for row, (field, label, hint) in enumerate((
+            ("queue_size", "Queued actions", "1 to 8"),
+            ("queue_ttl_ms", "Drop waiting input after (ms)", "100 to 750"),
+        )):
+            var = tk.StringVar()
+            self.limit_vars[field] = var
+            self.safety_entries[field] = self._field(advanced_fields, row, label, var, hint)
+        self.safety_entries["allowed_user_ids"] = self._field(advanced_fields, 2, "Only these Twitch user IDs", self.allowed_var, "Optional; comma separated")
+        self.safety_entries["blocked_user_ids"] = self._field(advanced_fields, 3, "Blocked Twitch user IDs", self.blocked_var, "Optional; comma separated")
+        self._wrapped_label(self.advanced_frame, text="Use numeric Twitch IDs, not display names. The allowed list also requires the selected audience role.", style="CardMuted.TLabel", wraplength=900).pack(anchor="w", pady=(8, 0))
+        self.safety_actions = ttk.Frame(frame)
+        self.safety_actions.pack(fill="x", pady=(6, 0))
+        ttk.Button(self.safety_actions, text="Apply safety settings", style="Accent.TButton", command=self._apply_profile).pack(side="left")
+        ttk.Label(self.safety_actions, text="Changes pause control. Save the profile to keep them.", style="Muted.TLabel").pack(side="left", padx=(12, 0))
         self.safety_var = tk.StringVar(value="Checking local input safety...")
-        ttk.Label(frame, textvariable=self.safety_var, style="Muted.TLabel", wraplength=960).grid(row=12, column=0, columnspan=3, sticky="w", pady=(8, 0))
+        self._wrapped_label(frame, textvariable=self.safety_var, style="Muted.TLabel", wraplength=930).pack(anchor="w", pady=(14, 0))
         for var in (self.profile_name, self.audience_var, self.allowed_var, self.blocked_var, *self.limit_vars.values()):
             var.trace_add("write", self._profile_edited)
 
-    def _field(self, frame: ttk.Frame, row: int, label: str, var: tk.StringVar, hint: str = "") -> None:
-        ttk.Label(frame, text=label).grid(row=row, column=0, sticky="w", padx=(0, 16))
-        ttk.Entry(frame, textvariable=var).grid(row=row, column=1, sticky="ew", pady=5)
-        if hint:
-            ttk.Label(frame, text=hint, style="Muted.TLabel").grid(row=row, column=2, sticky="w", padx=(16, 0))
+    def _field(self, frame: ttk.Frame, row: int, label: str, var: tk.StringVar, hint: str = "") -> ttk.Entry:
+        title = ttk.Label(frame, text=label, style="Card.TLabel")
+        title.grid(row=row, column=0, sticky="w", padx=(0, 16))
+        entry = ttk.Entry(frame, textvariable=var, width=40 if "IDs" in label else 16)
+        entry.grid(row=row, column=1, sticky="w", pady=5)
+        help_label = ttk.Label(frame, text=hint, style="CardMuted.TLabel")
+        help_label.grid(row=row, column=2, sticky="w", padx=(16, 0))
+        fields = self._field_groups.setdefault(frame, [])
+        fields.append((row, title, entry, help_label))
+        if len(fields) == 1:
+            stacked = False
+            def arrange(event: Any) -> None:
+                nonlocal stacked
+                required = sum(max(item[index].winfo_reqwidth() for item in fields) for index in (1, 2, 3)) + 32
+                next_stacked = event.width < required
+                if stacked == next_stacked:
+                    return
+                stacked = next_stacked
+                for index, title, entry, help_label in fields:
+                    title.grid_configure(row=index * 2 if stacked else index, column=0,
+                                         columnspan=3 if stacked else 1, pady=(8, 0) if stacked else 0)
+                    entry.grid_configure(row=index * 2 + 1 if stacked else index, column=0 if stacked else 1)
+                    help_label.grid_configure(row=index * 2 + 1 if stacked else index, column=1 if stacked else 2,
+                                              columnspan=2 if stacked else 1)
+            frame.bind("<Configure>", arrange)
+        return entry
+
+    def _toggle_advanced(self) -> None:
+        self._advanced_open = not self._advanced_open
+        if self._advanced_open:
+            self.advanced_frame.pack(fill="x", before=self.safety_actions, pady=(0, 8))
+        else:
+            self.advanced_frame.pack_forget()
+        self.advanced_button.configure(text="Hide advanced settings" if self._advanced_open else "Show advanced settings")
+
+    def _audience_changed(self, _event: Any = None) -> None:
+        selected = next((key for key, value in AUDIENCE_LABELS.items() if value == self.audience_label_var.get()), None)
+        if selected is not None:
+            self.audience_var.set(selected)
 
     def _build_activity(self) -> None:
-        ttk.Label(self.activity_tab, text="Recent decisions", style="Heading.TLabel").pack(anchor="w")
-        ttk.Label(self.activity_tab, text="A bounded, in-memory log of approved commands and reasons. Raw chat, sign-in codes, and tokens are never logged.", style="Muted.TLabel", wraplength=980).pack(anchor="w", pady=(5, 12))
+        header = ttk.Frame(self.activity_tab)
+        header.pack(fill="x")
+        ttk.Label(header, text="What happened in your session", style="Heading.TLabel").pack(side="left")
+        ttk.Button(header, text="Clear activity", command=self._clear_log).pack(side="right")
+        ttk.Label(self.activity_tab, text="The latest 200 events. Scroll up to read without being pulled back to new entries.\nChat text and sign-in details are never recorded here.", style="Muted.TLabel").pack(anchor="w", pady=(6, 12))
         frame = ttk.Frame(self.activity_tab)
         frame.pack(fill="both", expand=True)
-        self.log = tk.Text(frame, bg=PANEL, fg=TEXT, insertbackground=TEXT, relief="flat", wrap="word", font=(self._mono_family, 10), height=15, state="disabled", padx=12, pady=12)
+        self.log = tk.Text(frame, bg=PANEL, fg=TEXT, insertbackground=TEXT, relief="flat", wrap="word",
+                           font=(self._mono_family, 10), height=12, state="disabled", padx=14, pady=12,
+                           highlightthickness=1, highlightbackground=BORDER, highlightcolor=ACCENT)
         scroll = ttk.Scrollbar(frame, command=self.log.yview)
         self.log.configure(yscrollcommand=scroll.set)
         scroll.pack(side="right", fill="y")
         self.log.pack(side="left", fill="both", expand=True)
-        ttk.Button(self.activity_tab, text="Clear activity", command=self._clear_log).pack(anchor="w", pady=(12, 0))
+
+    def _focus_widget(self, widget: tk.Widget) -> None:
+        for index, page in enumerate(self._pages):
+            if str(widget).startswith(str(page.content) + "."):
+                self.notebook.select(index)
+                self.root.update_idletasks()
+                widget.focus_set()
+                page.reveal_widget(widget)
+                return
+        widget.focus_set()
+
+    def _go_to_step(self, action: str | None) -> None:
+        self.command_editor.cancel_capture()
+        if action == "commands":
+            self._focus_widget(self.command_editor.trigger_entry if self.command_editor.commands else self.command_editor.new_button)
+        elif action == "safety":
+            self._focus_widget(self.audience_combo)
+        elif action in {"connect", "game", "ack"}:
+            self.connection_setup_var.set(True)
+            self._refresh_session_ui()
+            self._focus_widget({"connect": self.channel_entry, "game": self.window_combo, "ack": self.ack_check}[action])
+        elif action == "restart":
+            messagebox.showinfo("Restart the app", "Save your profile, close the app, and reopen it without administrator rights. If F8 is in use by another app, free it before restarting.", parent=self.root)
+
+    def _next_step(self) -> None:
+        readiness = self._refresh_session_ui()
+        self._go_to_step(readiness.action or "commands")
+
+    def _shortcut(self, action: str) -> str:
+        if self.command_editor.capture_active:
+            self.command_editor.cancel_capture()
+            self.notice_var.set("Key capture canceled. Use an unmodified game key when capturing a control.")
+            return "break"
+        if action == "save":
+            self._save_profile()
+        elif action == "save_as":
+            self._save_profile(save_as=True)
+        elif action == "open":
+            self._import_profile()
+        elif action in {f"tab_{index}" for index in range(4)}:
+            self.notebook.select(int(action[-1]))
+        return "break"
+
+    def _toggle_connection_setup(self) -> None:
+        self.connection_setup_var.set(not self.connection_setup_var.get())
+        self._refresh_session_ui()
+        if self.connection_setup_var.get():
+            self._focus_widget(self.channel_entry)
+
+    def _pause(self) -> None:
+        self.command_editor.cancel_capture()
+        self.engine.disarm("stopped_locally")
+        self.notice_var.set("Paused. Queued actions cleared; start again when you are ready.")
+        self._refresh_session_ui()
 
     def _post(self, kind: str, value: Any) -> None:
         try:
@@ -373,74 +608,158 @@ class App:
     def _pump(self) -> None:
         if self._closed:
             return
+        if self._pump_id is not None:
+            self.root.after_cancel(self._pump_id)
+            self._pump_id = None
         self._last_ui_heartbeat = time.monotonic()
+        activity: list[str] = []
         for _ in range(60):
             try:
                 kind, value = self._events.get_nowait()
             except queue.Empty:
                 break
             if kind == "decision":
-                self._log(f"{value.kind}: {value.reason}" + (f" · {value.command}" if value.command else ""))
+                label = {"state": "Session", "connection": "Twitch", "accepted": "Accepted", "rejected": "Not accepted",
+                         "preview": "Preview", "executed": "Game input", "released": "Released", "dropped": "Skipped",
+                         "fault": "Safety stop", "blocked": "Setup needed"}.get(value.kind, "Session")
+                activity.append(f"{label}" + (f" · {value.command}" if value.command else "") + f": {reason_text(value.reason)}")
             elif kind == "notice":
-                self.notice_var.set(value)
-                self._log(value)
+                set_var_if_changed(self.notice_var, value)
+                activity.append(value)
             elif kind == "status":
                 generation, status, detail = value
                 if generation != self._generation:
                     continue
-                self.connection_var.set(f"Twitch: {status}")
-                self.notice_var.set(detail)
-                self._log(detail)
+                labels = {"connected": "Twitch connected", "disconnected": "Twitch not connected", "error": "Twitch needs attention",
+                          "connecting": "Connecting to Twitch...", "authorizing": "Waiting for Twitch sign-in..."}
+                set_var_if_changed(self.connection_var, labels.get(status, "Twitch: " + status.replace("_", " ")))
+                set_var_if_changed(self.notice_var, detail)
+                activity.append(detail)
                 if status in {"connected", "disconnected", "error"}:
                     self._clear_device()
                 if status in {"disconnected", "error"}:
-                    self.connect_button.configure(text="Connect")
-                    self.channel_entry.state(["!disabled"])
-                    self.client_entry.state(["!disabled"])
+                    configure_if_changed(self.connect_button, text="Connect Twitch")
+                    set_enabled(self.channel_entry, True)
+                    set_enabled(self.client_entry, True)
             elif kind == "device":
                 generation, uri, code = value
                 if generation == self._generation:
                     self._show_device(uri, code)
+        append_log_lines(self.log, activity)
+        self._refresh_session_ui()
+        self._pump_id = self.root.after(50, self._pump)
+
+    def _refresh_session_ui(self) -> Readiness:
         snapshot = self.engine.snapshot()
-        # Windows may consume F8 as a registered global hotkey before Tk sees
-        # a key event. Mirror the native stop on the GUI thread as well.
         if snapshot.reason == "emergency_stop":
+            # Registered native F8 can be consumed before Tk receives KeyPress.
             self.command_editor.cancel_capture()
-        # While disarmed, show the locally selected mode. The engine remembers
-        # its last armed mode until the next explicit local arm.
-        selected_preview = self.mode_var.get() == "preview" if snapshot.state == "disarmed" else snapshot.preview
-        mode = "PREVIEW" if selected_preview else "LIVE GAME INPUT"
+        requested_mode = self.mode_var.get()
+        if snapshot.state in {"armed", "pending"}:
+            # The running engine is authoritative. A normal local mode change
+            # disarms before refreshing, so this only repairs a stale UI value.
+            requested_mode = "preview" if snapshot.preview else "live"
+            set_var_if_changed(self.mode_var, requested_mode)
+        available, safety_ready = self.backend.available, self.backend.safety_ready
+        target_selected = self.backend.target_selected
+        signature = (snapshot.state, snapshot.preview, snapshot.connected, snapshot.reason,
+                     snapshot.backend_fault, round(snapshot.pending_seconds, 1), requested_mode,
+                     available, safety_ready, target_selected, self._stop.is_set(), self._profile,
+                     self.command_editor.dirty, self._dirty, self.ack_var.get(), self.connection_setup_var.get())
+        if getattr(self, "_ui_signature", None) == signature:
+            self._update_profile_status()
+            return self._readiness
+        preview = requested_mode == "preview" if snapshot.state == "disarmed" else snapshot.preview
+        mode = "PREVIEW" if preview else "LIVE GAME INPUT"
         state_text = f"ARMING {snapshot.pending_seconds:.1f}s" if snapshot.state == "pending" else snapshot.state.upper()
-        self.state_var.set(f"{state_text} · {mode}")
-        self.arm_button.configure(text="Arm preview" if self.mode_var.get() == "preview" else "Arm live · 3 seconds")
-        can_simulate = self.mode_var.get() == "preview" and snapshot.preview
-        self.sim_button.state(["!disabled"] if can_simulate else ["disabled"])
-        if not self.backend.available:
-            self.safety_var.set("Preview available. Live game input requires Windows 10/11.")
-        elif self.backend.safety_ready:
-            self.safety_var.set("F8 emergency hotkey is registered. Foreground, process identity, modifier, and held-key checks are active.")
+        set_var_if_changed(self.state_var, f"{state_text} · {mode}")
+        if snapshot.state == "pending":
+            status, style = f"Switch to your game · {snapshot.pending_seconds:.1f}s", "Live.TLabel"
+        elif snapshot.state == "armed":
+            status = "Preview running · No keys sent" if preview else "Live control active · F8 stops input"
+            style = "Status.TLabel" if preview else "Live.TLabel"
+        elif snapshot.backend_fault and requested_mode == "live":
+            status, style = "Stopped · Restart before live input", "Stopped.TLabel"
+        elif snapshot.reason == "emergency_stop":
+            status, style = "Emergency stop · Controls are off", "Stopped.TLabel"
         else:
-            self.safety_var.set("Live input unavailable: the F8 hotkey or native safety checks are not ready. Run without administrator rights and free F8 in other apps.")
+            status = "Paused · Preview" if preview else "Paused · Game input is off"
+            style = "Paused.TLabel"
+        set_var_if_changed(self.status_var, status)
+        configure_if_changed(self.status_label, style=style)
+        enabled = sum(command.enabled for command in self._profile.commands)
+        readiness = session_readiness(
+            mode=("preview" if snapshot.preview else "live") if snapshot.state in {"armed", "pending"} else requested_mode,
+            state=snapshot.state, connected=snapshot.connected,
+            available=available, safety_ready=safety_ready,
+            target_selected=target_selected, faulted=snapshot.backend_fault,
+            worker_stopped=self._stop.is_set(), enabled_commands=enabled,
+            command_draft=self.command_editor.dirty, safety_draft=self._dirty,
+            acknowledged=self.ack_var.get(),
+        )
+        self._readiness = readiness
+        set_var_if_changed(self.readiness_var, readiness.headline)
+        set_var_if_changed(self.readiness_detail_var, readiness.detail)
+        action_labels = {"commands": "Review commands", "safety": "Review settings", "connect": "Connect Twitch",
+                         "game": "Choose game", "ack": "Review reminder", "restart": "Restart help"}
+        configure_if_changed(self.next_step_button, text=action_labels.get(readiness.action, "Review commands"))
+        configure_if_changed(self.arm_button, text="Start preview" if requested_mode == "preview" else "Arm game control · 3 s")
+        set_enabled(self.arm_button, readiness.ready)
+        set_enabled(self.pause_button, snapshot.state in {"armed", "pending"})
+        can_simulate = requested_mode == "preview" and snapshot.preview and snapshot.state == "armed"
+        set_enabled(self.sim_button, can_simulate)
+        sim_state = (requested_mode, snapshot.state, snapshot.preview)
+        if getattr(self, "_last_sim_state", None) != sim_state:
+            self._last_sim_state = sim_state
+            if snapshot.state in {"armed", "pending"} and not snapshot.preview:
+                simulator_hint = "Pause live control, then switch to Preview before using the simulator."
+            elif can_simulate:
+                simulator_hint = "Preview is running. Try a command and compare different viewer roles."
+            else:
+                simulator_hint = "Start Preview to try a command. Nothing will be sent to your keyboard."
+            set_var_if_changed(self.sim_result_var, simulator_hint)
+        triggers = tuple(command.trigger for command in self._profile.commands if command.enabled)
+        configure_if_changed(self.sim_entry, values=triggers)
+        audience = AUDIENCE_LABELS.get(self._profile.audience, "Review audience")
+        set_var_if_changed(self.profile_summary_var, f"{self._profile.name}\n{enabled} enabled commands · {audience}")
+        allowed = f"{len(self._profile.allowed_user_ids)} allowed IDs" if self._profile.allowed_user_ids else "Allowed-user list off"
+        set_var_if_changed(self.access_summary_var, f"Applied: {allowed} · {len(self._profile.blocked_user_ids)} blocked IDs. Queue: {self._profile.queue_size}; expiry: {self._profile.queue_ttl_ms} ms.")
+        if not available:
+            safety = "Preview works here. Live game control requires the Windows app and its native safety checks."
+        elif safety_ready:
+            safety = "F8 is ready. Focus, process, modifier-key, and held-key safeguards are active for live control."
+        else:
+            safety = "F8 or native safety checks are not ready. Free F8 in other apps and restart without administrator rights."
+        set_var_if_changed(self.safety_var, safety)
+        live = requested_mode == "live"
+        show_connection = live or self.connection_setup_var.get()
+        layout_key = (live, show_connection)
+        if getattr(self, "_session_layout_key", None) != layout_key:
+            self._session_layout_key = layout_key
+            if live:
+                self.preview_card.grid_remove()
+                self.game_card.grid()
+            else:
+                self.preview_card.grid()
+                self.game_card.grid_remove()
+            if show_connection:
+                self.connection_card.grid(columnspan=1 if live else 2, padx=(0, 7) if live else 0)
+            else:
+                self.connection_card.grid_remove()
+        configure_if_changed(self.connection_setup_button, text="Hide Twitch setup" if show_connection else "Connect Twitch to test real chat...")
         self._update_profile_status()
-        self.root.after(50, self._pump)
+        self._ui_signature = signature
+        return readiness
 
     def _log(self, text: str) -> None:
-        # Only internal reason codes, validated command names and fixed status
-        # strings reach this widget. Never interpolate untrusted chat or errors.
-        self.log.configure(state="normal")
-        self.log.insert("end", f"{datetime.now():%H:%M:%S}  {text[:350]}\n")
-        lines = int(self.log.index("end-1c").split(".")[0])
-        if lines > 201:
-            self.log.delete("1.0", f"{lines - 200}.0")
-        self.log.see("end")
-        self.log.configure(state="disabled")
+        # Existing callers supply only approved status strings and validated mappings.
+        append_log_lines(self.log, [text])
 
     def _clear_log(self) -> None:
-        self.log.configure(state="normal")
-        self.log.delete("1.0", "end")
-        self.log.configure(state="disabled")
+        clear_log(self.log)
 
     def _connect(self) -> None:
+        self.connection_setup_var.set(True)
         with self._connection_lock:
             already_running = self._client is not None and self._client.running
         if already_running:
@@ -485,7 +804,7 @@ class App:
                 self._client = None
                 messagebox.showerror("Connection unavailable", "Twitch sign-in could not start. Check your settings and try again.", parent=self.root)
                 return
-        self.connect_button.configure(text="Disconnect")
+        configure_if_changed(self.connect_button, text="Disconnect Twitch")
         self.channel_entry.state(["disabled"])
         self.client_entry.state(["disabled"])
 
@@ -497,8 +816,8 @@ class App:
         if client is not None:
             client.stop()
         self._clear_device()
-        self.connection_var.set("Twitch: disconnected")
-        self.connect_button.configure(text="Connect")
+        set_var_if_changed(self.connection_var, "Twitch not connected")
+        configure_if_changed(self.connect_button, text="Connect Twitch")
         self.channel_entry.state(["!disabled"])
         self.client_entry.state(["!disabled"])
         self.notice_var.set("Disconnected. Controls are disarmed; session authorization has been discarded.")
@@ -524,6 +843,10 @@ class App:
         ttk.Label(body, textvariable=self._device_value, font=(self._mono_family, 24, "bold"), foreground=ACCENT).pack(anchor="w")
         ttk.Button(body, text="Open Twitch activation", style="Accent.TButton", command=lambda: webbrowser.open(ACTIVATE_URL)).pack(anchor="w", pady=(20, 8))
         ttk.Button(body, text="Cancel sign-in", command=self._disconnect).pack(anchor="w")
+        dialog.update_idletasks()
+        width = min(max(500, dialog.winfo_reqwidth()), self.root.winfo_screenwidth() - 60)
+        height = min(max(310, dialog.winfo_reqheight()), self.root.winfo_screenheight() - 60)
+        dialog.geometry(f"{width}x{height}")
 
     def _clear_device(self) -> None:
         if self._device_value is not None:
@@ -558,11 +881,14 @@ class App:
     def _mode_changed(self) -> None:
         self.engine.disarm("mode_changed")
         self.ack_var.set(False)
-        self.notice_var.set("Mode changed. Review your commands and arm locally when ready.")
+        self.command_editor.cancel_capture()
+        self.notice_var.set("Mode changed. Controls are paused; start when you are ready.")
+        self._refresh_session_ui()
 
     def _ack_changed(self) -> None:
         if not self.ack_var.get():
             self.engine.disarm("acknowledgment_cleared")
+        self._refresh_session_ui()
 
     def _arm(self) -> None:
         if self._stop.is_set():
@@ -571,25 +897,32 @@ class App:
         self.command_editor.cancel_capture()
         if not self._apply_pending_profile():
             return
+        readiness = self._refresh_session_ui()
+        if not readiness.ready:
+            self.notice_var.set(readiness.headline + ". " + readiness.detail)
+            return
         preview = self.mode_var.get() == "preview"
         if not preview and not self.ack_var.get():
             messagebox.showinfo("Review game focus", "Pause controls before opening game chat, consoles, overlays, purchases, or sensitive menus. Check the acknowledgment before enabling live input.", parent=self.root)
             return
         if not self.engine.arm(preview=preview, delay_seconds=3.0):
-            self.notice_var.set("Cannot arm. Check the connection, selected game, F8 hotkey, and safety settings.")
+            self.notice_var.set(reason_text(self.engine.snapshot().reason))
         elif not preview:
             self.notice_var.set("Focus your selected game now. Live input starts only if it is in focus after 3 seconds.")
         else:
-            self.notice_var.set("Preview armed. Try a command below or connect Twitch. No keys are sent.")
+            self.notice_var.set("Preview started. Try a command on Session; no game keys are sent.")
+        self._refresh_session_ui()
 
     def _panic(self) -> None:
         self.command_editor.cancel_capture()
         self.engine.emergency_stop()
         self.notice_var.set("Emergency stop. All queued controls cleared; manual arming is required.")
+        self._refresh_session_ui()
 
     def _simulate(self) -> None:
         snapshot = self.engine.snapshot()
-        if self.mode_var.get() != "preview" or not snapshot.preview:
+        if self.mode_var.get() != "preview" or not snapshot.preview or snapshot.state != "armed":
+            self.sim_result_var.set("Start Preview before trying a command. Live game input cannot use this simulator.")
             return
         role = self.sim_role.get()
         message = ChatMessage(
@@ -598,10 +931,12 @@ class App:
             channel_id="100000002", received_at=time.monotonic(),
         )
         decision = self.engine.submit(message)
-        if decision.reason in {"not_an_exact_command", "unknown_or_disabled_command"}:
-            self.notice_var.set("Enter one exact enabled command from Controls & commands, with no spaces or arguments.")
-        elif not decision.accepted:
-            self.notice_var.set("Preview rejected: " + decision.reason.replace("_", " ") + ".")
+        if decision.accepted:
+            result = f"Accepted as {ROLE_LABELS.get(role, 'Viewer')}. The mapped action is queued in Preview; no keys will be sent."
+        else:
+            result = reason_text(decision.reason)
+        self.sim_result_var.set(result)
+        self.notice_var.set(result)
 
     def _profile_edited(self, *_args: Any) -> None:
         if not self._loading:
@@ -665,6 +1000,21 @@ class App:
 
     def _profile_error(self, error: Exception) -> None:
         detail = str(error) if isinstance(error, ProfileError) else "The profile could not be validated."
+        field = next((name for name in self.safety_entries if name in detail or name.replace("_", " ") in detail), None)
+        if "Profile name" in detail:
+            self._last_profile_error_widget = self.profile_name_entry
+        else:
+            if field in {"queue_size", "queue_ttl_ms", "allowed_user_ids", "blocked_user_ids"} and not self._advanced_open:
+                self._toggle_advanced()
+            self._last_profile_error_widget = self.safety_entries.get(field, self.audience_combo)
+        self._focus_widget(self._last_profile_error_widget)
+        labels = {"global_cooldown_ms": "Between commands (ms)", "viewer_cooldown_ms": "Each viewer waits (ms)",
+                  "max_actions_per_minute": "Actions per minute", "queue_size": "Queued actions",
+                  "queue_ttl_ms": "Drop waiting input after (ms)", "allowed_user_ids": "Only these Twitch user IDs",
+                  "blocked_user_ids": "Blocked Twitch user IDs"}
+        if field is not None:
+            detail = detail.replace(field, labels[field]).replace(field.replace("_", " "), labels[field])
+        detail = detail.replace("–", " to ")
         messagebox.showerror("Check safety settings", detail, parent=self.root)
         self.notice_var.set("Correct the safety settings before applying commands, saving, or arming.")
 
@@ -696,8 +1046,15 @@ class App:
         return True
 
     def _apply_pending_profile(self) -> bool:
+        self._last_profile_error_widget = None
         if not self.command_editor.apply_pending():
             self.engine.disarm("invalid_command_draft")
+            if self._last_profile_error_widget is not None:
+                self._focus_widget(self._last_profile_error_widget)
+            else:
+                self.notebook.select(1)
+                self.root.update_idletasks()
+                self.command_editor.focus_problem()
             return False
         return self._apply_profile() if self._dirty else True
 
@@ -829,6 +1186,9 @@ class App:
         if not force and not self._confirm_profile_replacement("closing the app"):
             return
         self._closed = True
+        if self._pump_id is not None:
+            self.root.after_cancel(self._pump_id)
+            self._pump_id = None
         self._stop.set()
         self._disconnect()
         self.client_id_var.set("")

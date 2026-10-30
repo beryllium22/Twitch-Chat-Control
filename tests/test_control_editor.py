@@ -86,7 +86,7 @@ def test_mapping_edits_pause_immediately_and_apply_one_validated_tuple(editor):
     ("trigger_var", "!jump", "already assigned"),
     ("trigger_var", "!forward 100", "Chat command"),
     ("trigger_var", "!FORWARD", "Chat command"),
-    ("key_var", "Ctrl+R", "Game control"),
+    ("key_var", "Ctrl+R", "Game key"),
     ("hold_var", "451", "Hold"),
     ("hold_var", "1e2", "Hold"),
     ("cooldown_var", "-1", "Cooldown"),
@@ -295,3 +295,225 @@ def test_preview_uses_only_the_parent_dry_run_callback(editor):
     widget.hold_var.set("5000")
     widget.preview_command()
     assert len(editor.state.previews) == 1
+
+
+def test_empty_and_no_match_states_explain_next_step_without_losing_draft(editor):
+    widget = editor.widget
+    widget.hold_var.set("225")
+    widget.filter_var.set("nothing-matches")
+    editor.root.update()
+    assert not widget.tree.get_children()
+    assert "No matches" in widget.empty_var.get()
+    assert widget.empty_table.winfo_ismapped()
+    assert widget.selected_trigger == "!forward"
+    assert widget.dirty
+    widget.clear_search_button.invoke()
+    editor.root.update()
+    assert widget.tree.selection() == ("!forward",)
+    assert widget.hold_var.get() == "225"
+    assert not widget.empty_table.winfo_ismapped()
+    assert "disabled" in widget.clear_search_button.state()
+
+    widget.set_commands(())
+    editor.root.update()
+    assert "No commands yet" in widget.empty_var.get()
+    assert widget.empty_detail.winfo_ismapped()
+    assert not widget.form.winfo_ismapped()
+    widget.new_button.invoke()
+    editor.root.update()
+    assert widget.form.winfo_ismapped()
+    assert not widget.empty_detail.winfo_ismapped()
+    assert widget.dirty
+
+
+def test_invalid_apply_focuses_problem_and_correction_clears_field_state(editor):
+    widget = editor.widget
+    editor.root.focus_force()
+    widget.hold_var.set("900")
+    widget.trigger_entry.focus_force()
+    assert not widget.error_var.get()
+    assert "invalid" not in widget.hold_entry.state()
+    assert not widget.apply_pending()
+    editor.root.update()
+    assert editor.root.focus_get() is widget.hold_entry
+    assert "invalid" in widget.hold_entry.state()
+    assert widget.error_label.winfo_ismapped()
+    widget.hold_var.set("200")
+    editor.root.update()
+    assert "invalid" not in widget.hold_entry.state()
+    assert not widget.error_label.winfo_ismapped()
+    assert widget.apply_pending()
+    assert "disabled" in widget.apply_button.state()
+    assert "disabled" in widget.revert_button.state()
+    assert "Applied" in widget.draft_var.get()
+
+
+@pytest.mark.parametrize("field,variable,incomplete,corrected,reason", [
+    ("trigger_entry", "trigger_var", "!", "!walk", "Chat command"),
+    ("hold_entry", "hold_var", "", "200", "Hold"),
+])
+def test_initial_typing_waits_for_blur_before_feedback_then_corrections_clear_it(
+    editor, field, variable, incomplete, corrected, reason,
+):
+    widget = editor.widget
+    original = widget.commands
+    entry, value = getattr(widget, field), getattr(widget, variable)
+    editor.root.focus_force()
+    entry.focus_force()
+    editor.root.update()
+    value.set(incomplete)
+    editor.root.update()
+    assert widget.dirty
+    assert editor.state.edits
+    assert not widget.error_var.get()
+    assert "invalid" not in entry.state()
+    assert not widget.error_label.winfo_ismapped()
+
+    widget.search_entry.focus_force()
+    editor.root.update()
+    assert reason in widget.error_var.get()
+    assert "invalid" in entry.state()
+    assert widget.error_label.winfo_ismapped()
+
+    entry.focus_force()
+    value.set(corrected)
+    editor.root.update()
+    assert not widget.error_var.get()
+    assert "invalid" not in entry.state()
+    assert not widget.error_label.winfo_ismapped()
+    assert widget.commands == original
+    assert not editor.state.changes
+
+
+def test_keyboard_navigation_opens_selected_mapping_and_applies_local_draft(editor):
+    widget = editor.widget
+    editor.root.focus_force()
+    widget.tree.focus_force()
+    editor.root.update()
+    widget.tree.event_generate("<Return>")
+    editor.root.update()
+    assert editor.root.focus_get() is widget.trigger_entry
+    widget.trigger_var.set("!walk")
+    widget.trigger_entry.event_generate("<Return>")
+    editor.root.update()
+    assert widget.selected_trigger == "!walk"
+    assert widget.commands[0].trigger == "!walk"
+    assert len(editor.state.changes) == 1
+    assert not editor.state.previews
+    assert not widget.dirty
+
+
+def test_visible_capture_cancel_remains_canceled_after_focus_out(editor):
+    widget = editor.widget
+    original = widget.key_var.get()
+    focus_capture(editor)
+    assert widget.cancel_capture_button.winfo_ismapped()
+    # A mouse click can move focus before the button command runs. Cancellation
+    # must not restart capture when that command follows the FocusOut callback.
+    widget.cancel_capture_button.focus_force()
+    editor.root.update()
+    widget.cancel_capture_button.invoke()
+    editor.root.update()
+    assert not widget.capture_active
+    assert not widget.capture_row.winfo_ismapped()
+    assert widget.key_var.get() == original
+    assert not widget.dirty
+    assert not editor.state.changes
+
+
+def test_unchanged_rows_are_not_recreated_during_profile_refresh_or_search(editor, monkeypatch):
+    widget = editor.widget
+    inserts, deletes = [], []
+    original_insert, original_delete = widget.tree.insert, widget.tree.delete
+
+    def insert(*args, **kwargs):
+        inserts.append(args)
+        return original_insert(*args, **kwargs)
+
+    def delete(*args):
+        deletes.append(args)
+        return original_delete(*args)
+
+    monkeypatch.setattr(widget.tree, "insert", insert)
+    monkeypatch.setattr(widget.tree, "delete", delete)
+    widget.set_commands(widget.commands)
+    widget.filter_var.set("!")  # Every existing row still matches.
+    editor.root.update()
+    assert not inserts
+    assert not deletes
+    assert widget.tree.selection() == ("!forward",)
+
+
+def test_pause_failure_keeps_draft_visible_and_blocks_apply(editor):
+    widget = editor.widget
+    original = widget.commands
+
+    def fail_pause():
+        raise RuntimeError("Synthetic internal detail")
+
+    widget._on_edit = fail_pause
+    widget.hold_var.set("200")
+    assert widget.dirty
+    assert "Restart the app" in widget.error_var.get()
+    assert "Synthetic" not in widget.error_var.get()
+    assert "disabled" in widget.apply_button.state()
+    assert not widget.apply_pending()
+    assert widget.commands == original
+    assert not editor.state.changes
+
+
+def test_cards_reflow_without_losing_draft_selection_or_capture(editor):
+    widget = editor.widget
+    required = widget._left_card.winfo_reqwidth() + widget._right_card.winfo_reqwidth() + 10
+    narrow = max(widget._left_card.winfo_reqwidth(), widget._right_card.winfo_reqwidth()) + 20
+    editor.root.geometry(f"{required + 80}x1000")
+    # Keep the top-level window focused while changing the editor's available
+    # space. Some headless window managers genuinely drop application focus on
+    # a top-level resize; that must still cancel capture for safety.
+    widget.pack_configure(fill="y", expand=False, anchor="nw")
+    widget.grid_propagate(False)
+    widget.configure(width=required + 80, height=1000)
+    editor.root.update()
+    widget.hold_var.set("225")
+    focus_capture(editor)
+    assert widget._layout_mode == "columns"
+    widget.configure(width=narrow)
+    editor.root.update()
+    assert widget._layout_mode == "stacked"
+    assert widget._left_card.grid_info()["row"] == 0
+    assert widget._right_card.grid_info()["row"] == 1
+    assert widget.capture_active
+    assert editor.root.focus_get() is widget.capture_entry
+    assert widget.dirty
+    assert widget.hold_var.get() == "225"
+    assert widget.selected_trigger == "!forward"
+    assert widget.tree.selection() == ("!forward",)
+
+    widget.configure(width=required + 80)
+    editor.root.update()
+    assert widget._layout_mode == "columns"
+    assert widget.capture_active
+    assert editor.root.focus_get() is widget.capture_entry
+    assert widget._layout_job is None
+
+
+def test_larger_fonts_leave_command_button_and_table_labels_readable(editor):
+    widget = editor.widget
+    style = module.ttk.Style(editor.root)
+    family = module.tkfont.nametofont("TkDefaultFont").actual("family")
+    style.configure("TButton", font=(family, 16))
+    style.configure("Treeview", font=(family, 16))
+    style.configure("Treeview.Heading", font=(family, 16, "bold"))
+    widget.event_generate("<<ThemeChanged>>")
+    editor.root.update()
+    body = module.tkfont.Font(root=editor.root, font=style.lookup("Treeview", "font"))
+    heading = module.tkfont.Font(root=editor.root, font=style.lookup("Treeview.Heading", "font"))
+    button = module.tkfont.Font(root=editor.root, font=style.lookup("TButton", "font"))
+
+    assert widget.new_button.winfo_width() >= button.measure("New command") + 8
+    assert widget.tree.column("key", "minwidth") >= max(heading.measure("Game key"), body.measure("Arrow Right")) + 8
+    assert widget.tree.column("enabled", "minwidth") >= max(heading.measure("Status"), body.measure("Disabled")) + 8
+    assert widget.tree.column("trigger", "minwidth") >= heading.measure("Chat command") + 8
+    required = widget._left_card.winfo_reqwidth() + widget._right_card.winfo_reqwidth() + 10
+    if required > widget.winfo_width():
+        assert widget._layout_mode == "stacked"

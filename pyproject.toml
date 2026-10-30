@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "twitch-chat-control"
-version = "0.2.0"
+version = "0.3.0"
 description = "A Windows desktop app for bounded, streamer-approved Twitch chat game controls."
 readme = "README.md"
 requires-python = ">=3.11,<3.15"
