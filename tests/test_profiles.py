@@ -44,7 +44,7 @@ def test_command_limits_reject_wrong_types_and_out_of_bounds(field, value):
 
 
 @pytest.mark.parametrize("field,value", [
-    ("schema_version", 2), ("schema_version", True),
+    ("schema_version", 3), ("schema_version", True),
     ("global_cooldown_ms", 99), ("global_cooldown_ms", "100"),
     ("viewer_cooldown_ms", 249), ("viewer_cooldown_ms", False),
     ("max_actions_per_minute", 0), ("max_actions_per_minute", 301),

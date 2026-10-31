@@ -38,7 +38,7 @@ def session_readiness(
                          "restart")
     if mode not in {"preview", "live"}:
         return Readiness(False, "Choose how to try your commands",
-                         "Select Preview for a test without keyboard input, or Live input for your game.", None)
+                         "Select Preview for a test without game input, or Live input for your game.", None)
     if mode == "live" and faulted:
         return Readiness(False, "Restart before using live input",
                          "A native input safety check failed. Close and reopen the app. Preview remains available.",
@@ -50,7 +50,7 @@ def session_readiness(
     if state == "armed":
         if mode == "preview":
             return Readiness(False, "Preview is running",
-                             "Try a command on Session. This session sends no keyboard input. Pause when finished.",
+                             "Try a command on Session. This session sends no keyboard or mouse input. Pause when finished.",
                              None)
         return Readiness(False, "Chat control is active",
                          "Keep your game focused. Use Pause or F8 before opening game chat, menus, or overlays.",
@@ -61,7 +61,7 @@ def session_readiness(
                          "restart")
     if enabled_commands <= 0 and not command_draft:
         return Readiness(False, "Add or enable a command",
-                         "Choose at least one chat command and game key in Controls & commands before starting.",
+                         "Choose at least one chat command and game action in Controls & commands before starting.",
                          "commands")
     if mode == "live":
         if not available:
@@ -95,7 +95,7 @@ def session_readiness(
                          "commands" if command_draft else "safety")
     if mode == "preview":
         return Readiness(True, "Try your commands safely",
-                         "Start Preview, then try a command on Session. No Twitch account or game is needed; no keys are sent.",
+                         "Start Preview, then try a command on Session. No Twitch account or game is needed; no game input is sent.",
                          None)
     return Readiness(True, "Ready for your game",
                      "Start live input, then switch to your selected game within 3 seconds. F8 stops control at any time.",
@@ -111,14 +111,14 @@ _REASONS = {
     "connected_controls_remain_disarmed": "Twitch connected. Controls stay paused until you start them locally.",
     "not_connected": "Connect your Twitch channel before starting live input.",
     "backend_fault_restart_required": "A native safety check failed. Restart the app before using live input.",
-    "input_release_failed_restart_required": "A key release could not be confirmed. Stop live use and restart the app.",
+    "input_release_failed_restart_required": "A key or mouse button release could not be confirmed. Stop live use and restart the app.",
     "input_failed_restart_required": "Game input failed. Restart the app before using live input again.",
     "emergency_stop_unavailable": "F8 is unavailable. Free the hotkey and restart the app before using live input.",
     "target_not_selected": "Choose a game window before starting live input.",
     "target_not_foreground": "The selected game lost focus. Return to it and start control again locally.",
     "physical_modifier_held": "A modifier key is held. Release it, then start control again locally.",
     "rearming": "Preparing a new session; previous queued actions have been cleared.",
-    "preview_armed": "Preview started. Commands are simulated without sending keys.",
+    "preview_armed": "Preview started. Commands are simulated without sending keyboard or mouse input.",
     "focus_game_countdown": "Switch to your selected game before the countdown ends.",
     "live_armed": "Live chat control started. F8 stops control.",
     "invalid_message": "The chat event could not be verified and was ignored.",
@@ -139,13 +139,24 @@ _REASONS = {
     "command_cooldown": "This command needs to wait before it can run again.",
     "minute_budget": "The action limit for the last minute has been reached. Wait before trying again.",
     "queue_full": "The command queue is full. This command was not added.",
-    "preview_queued": "Command accepted for Preview. No keyboard input will be sent.",
+    "preview_queued": "Command accepted for Preview. No keyboard or mouse input will be sent.",
     "live_queued": "Command accepted and queued for the selected game.",
     "worker_watchdog_delay": "Controls paused because the safety worker was delayed. Review the session before restarting.",
     "tap_finished": "The game key was released.",
     "queue_expired": "A queued command became too old and was dropped.",
-    "would_tap": "Preview checked the mapped key press. No keyboard input was sent.",
+    "would_tap": "Preview checked the mapped key press. No keyboard or mouse input was sent.",
+    "would_press_mouse_button": "Preview checked the mapped mouse button press. No keyboard or mouse input was sent.",
+    "would_move_mouse": "Preview checked the mapped mouse movement. No keyboard or mouse input was sent.",
+    "would_scroll_mouse": "Preview checked the mapped mouse wheel scroll. No keyboard or mouse input was sent.",
     "key_down": "The mapped game key was pressed.",
+    "mouse_button_down": "The mapped mouse button was pressed over the selected game.",
+    "mouse_button_released": "The mouse button was released.",
+    "mouse_moved": "The mapped relative mouse movement was sent.",
+    "mouse_scrolled": "The mapped mouse wheel scroll was sent.",
+    "mouse_pointer_outside_target": "Mouse control paused. Put the pointer over the selected game's play area, then start again locally.",
+    "mouse_move_outside_target": "Mouse control paused near the game edge. Move the pointer inward or reduce the movement, then start again locally.",
+    "physical_mouse_button_held": "Mouse control paused because a mouse button is held. Release it, then start again locally.",
+    "mouse_capture_unsafe": "Mouse control paused because a menu or another window may receive it. Close menus and return to gameplay before starting again.",
     "profile_changed": "Profile updated. Controls remain paused.",
     "interface_unresponsive": "Controls paused because the interface stopped responding.",
     "policy_worker_failed": "The safety worker failed. Restart the app before continuing.",
@@ -159,8 +170,8 @@ _REASONS = {
     "profile_apply": "Safety settings applied. Controls remain paused.",
     "commands_changed": "Command mappings updated. Controls remain paused.",
     "invalid_command_draft": "Fix or discard the command draft before starting a session.",
-    "command_preview": "Checking the selected mapping without sending keyboard input.",
-    "preview_complete": "Mapping preview finished. No keyboard input was sent.",
+    "command_preview": "Checking the selected mapping without sending keyboard or mouse input.",
+    "preview_complete": "Mapping preview finished. No keyboard or mouse input was sent.",
     "profile_navigation": "Controls paused while you manage profiles.",
     "new_profile": "Creating a new profile. Controls remain paused.",
     "profile_open": "Opening a profile. Controls remain paused.",
@@ -169,6 +180,7 @@ _REASONS = {
     "the_selected_game_lost_focus_or_changed_identity_": "The selected game lost focus or changed identity. Review the game selection and start again locally.",
     "a_modifier_key_was_pressed__live_input_was_paused_": "A modifier key was pressed. Release it, then start control again locally.",
     "the_independent_key_release_watchdog_paused_live_input_": "The key-release safeguard paused live input. Review the session before starting again.",
+    "the_independent_mouse_release_watchdog_paused_live_input_": "The mouse-button release safeguard paused live input. Review the session before starting again.",
     "f8_is_unavailable__close_the_app_using_it__then_restart_this_app": "F8 is unavailable. Close the app using it, then restart Twitch Chat Control.",
     "the_input_safety_monitor_stopped__live_control_is_disabled_": "The input safety monitor stopped. Restart the app before using live input.",
 }

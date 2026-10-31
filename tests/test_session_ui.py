@@ -28,7 +28,7 @@ def test_preview_needs_no_native_backend_connection_or_game():
     assert result.ready
     assert result.action is None
     assert "No Twitch account or game is needed" in result.detail
-    assert "no keys are sent" in result.detail
+    assert "no game input is sent" in result.detail
 
 
 @pytest.mark.parametrize("mode", ["preview", "live"])
@@ -135,7 +135,7 @@ def test_readiness_result_is_immutable():
     ("viewer_cooldown", "wait"),
     ("audience_restricted", "role"),
     ("input_release_failed_restart_required", "restart"),
-    ("would_tap", "No keyboard input"),
+    ("would_tap", "No keyboard or mouse input"),
     ("not_an_exact_command", "exact configured command"),
     ("the_selected_game_lost_focus_or_changed_identity_", "changed identity"),
     ("a_modifier_key_was_pressed__live_input_was_paused_", "modifier key"),

@@ -517,3 +517,214 @@ def test_larger_fonts_leave_command_button_and_table_labels_readable(editor):
     required = widget._left_card.winfo_reqwidth() + widget._right_card.winfo_reqwidth() + 10
     if required > widget.winfo_width():
         assert widget._layout_mode == "stacked"
+
+
+@pytest.mark.parametrize("action,updates,expected,visible", [
+    ("Mouse button", {"button_var": "Side button 2", "hold_var": "180"},
+     Command("!forward", hold_ms=180, cooldown_ms=300, action_type="mouse_button", button="x2"), "button_fields"),
+    ("Mouse movement", {"dx_var": "-100", "dy_var": "+25"},
+     Command("!forward", cooldown_ms=300, action_type="mouse_move", dx=-100, dy=25), "move_fields"),
+    ("Mouse wheel", {"wheel_direction_var": "Down", "wheel_steps_var": "3"},
+     Command("!forward", cooldown_ms=300, action_type="mouse_wheel", wheel=-3), "wheel_fields"),
+])
+def test_mouse_actions_show_only_relevant_fields_and_apply_a_bounded_command(editor, action, updates, expected, visible):
+    widget, state = editor.widget, editor.state
+    original = widget.commands
+    widget.action_var.set(action)
+    for name, value in updates.items():
+        getattr(widget, name).set(value)
+    editor.root.update()
+    assert state.edits
+    assert widget.dirty
+    assert widget.commands == original
+    for name in ("key_fields", "button_fields", "move_fields", "wheel_fields"):
+        assert bool(getattr(widget, name).winfo_ismapped()) == (name == visible)
+    assert bool(widget.hold_fields.winfo_ismapped()) == (action == "Mouse button")
+    assert widget.mouse_hint.winfo_ismapped()
+    assert widget.apply_pending()
+    assert widget.commands[0] == expected
+    assert widget.commands[1:] == original[1:]
+    assert state.changes == [widget.commands]
+    assert not widget.dirty
+    assert not widget.capture_active
+
+
+@pytest.mark.parametrize("button,label", module.BUTTON_LABELS.items())
+def test_all_mouse_buttons_have_explicit_readonly_bindings(editor, button, label):
+    widget = editor.widget
+    widget.action_var.set("Mouse button")
+    widget.button_var.set(label)
+    assert widget.apply_pending()
+    assert widget.commands[0].button == button
+    assert widget.commands[0].key == ""
+    assert str(widget.button_combo.cget("state")) == "readonly"
+    widget.start_capture()  # A programmatic call must respect the same rule.
+    assert not widget.capture_active
+
+
+def test_switching_to_mouse_cancels_key_capture_and_never_maps_the_next_key(editor):
+    widget = editor.widget
+    original = widget.key_var.get()
+    focus_capture(editor)
+    widget.action_var.set("Mouse movement")
+    editor.root.update()
+    assert not widget.capture_active
+    assert not widget.capture_row.winfo_ismapped()
+    assert key(editor, "z") is None
+    assert widget.key_var.get() == original
+    assert widget.apply_pending()
+    assert widget.commands[0].action_type == "mouse_move"
+    assert widget.commands[0].dx == 25
+    assert widget.commands[0].key == ""
+
+
+@pytest.mark.parametrize("action,field,value,error,focus", [
+    ("Mouse movement", "dx_var", "101", "Horizontal", "dx_entry"),
+    ("Mouse movement", "dx_var", "-101", "Horizontal", "dx_entry"),
+    ("Mouse movement", "dx_var", "1.5", "Horizontal", "dx_entry"),
+    ("Mouse movement", "dx_var", "１", "Horizontal", "dx_entry"),
+    ("Mouse movement", "dx_var", "--1", "Horizontal", "dx_entry"),
+    ("Mouse movement", "dy_var", "-", "Vertical", "dy_entry"),
+    ("Mouse movement", "dx_var", "0", "nonzero", "dx_entry"),
+    ("Mouse wheel", "wheel_steps_var", "0", "Steps", "wheel_steps_entry"),
+    ("Mouse wheel", "wheel_steps_var", "4", "Steps", "wheel_steps_entry"),
+    ("Mouse wheel", "wheel_steps_var", "-1", "Steps", "wheel_steps_entry"),
+    ("Mouse wheel", "wheel_direction_var", "Sideways", "Wheel direction", "wheel_direction_combo"),
+    ("Mouse button", "button_var", "Double-click", "Mouse button", "button_combo"),
+    ("Mouse button", "hold_var", "451", "Hold", "hold_entry"),
+    ("Mouse macro", "trigger_var", "!forward", "Game action", "action_combo"),
+])
+def test_invalid_mouse_drafts_preserve_applied_profile_and_focus_correction(editor, action, field, value, error, focus):
+    widget = editor.widget
+    original = widget.commands
+    editor.root.focus_force()
+    widget.action_var.set(action)
+    getattr(widget, field).set(value)
+    assert not widget.apply_pending()
+    editor.root.update()
+    assert error in widget.error_var.get()
+    assert editor.root.focus_get() is getattr(widget, focus)
+    assert widget.commands == original
+    assert not editor.state.changes
+    assert widget.dirty
+
+
+def test_mouse_movement_typing_waits_for_blur_then_correction_clears_error(editor):
+    widget = editor.widget
+    widget.action_var.set("Mouse movement")
+    editor.root.focus_force()
+    widget.dx_entry.focus_force()
+    editor.root.update()
+    widget.dx_var.set("-")
+    editor.root.update()
+    assert not widget.error_var.get()
+    widget.dy_entry.focus_force()
+    editor.root.update()
+    assert "Horizontal" in widget.error_var.get()
+    widget.dx_var.set("-25")
+    editor.root.update()
+    assert not widget.error_var.get()
+    assert widget.apply_pending()
+    assert widget.commands[0].dx == -25
+
+
+def test_hidden_key_and_hold_values_cannot_be_smuggled_into_a_movement(editor):
+    widget = editor.widget
+    widget.key_var.set("Ctrl+R")
+    widget.hold_var.set("99999")
+    widget.action_var.set("Mouse movement")
+    assert widget.apply_pending()
+    command = widget.commands[0]
+    assert command.key == ""
+    assert command.hold_ms == 100
+    assert command.action_type == "mouse_move"
+    assert command.button == ""
+    assert command.wheel == 0
+
+
+def test_switching_action_back_restores_keyboard_draft_without_irrelevant_mouse_changes(editor):
+    widget = editor.widget
+    original = widget.commands
+    widget.action_var.set("Mouse movement")
+    widget.dx_var.set("70")
+    widget.action_var.set("Keyboard key")
+    assert not widget.dirty
+    assert widget.commands == original
+    assert not editor.state.changes
+    assert editor.state.edits
+
+
+@pytest.mark.parametrize("command", [
+    Command("!look", action_type="mouse_move", dx=10, dy=-25, cooldown_ms=700),
+    Command("!fire", action_type="mouse_button", button="left", hold_ms=250, enabled=False),
+    Command("!next", action_type="mouse_wheel", wheel=-2),
+])
+def test_mouse_load_duplicate_and_dry_preview_preserve_the_full_binding(editor, command):
+    widget = editor.widget
+    widget.set_commands((command,))
+    assert not widget.dirty
+    widget.duplicate_command()
+    assert widget.dirty
+    assert widget.commands == (command,)
+    widget.preview_command()
+    assert len(widget.commands) == 2
+    copy = widget.commands[-1]
+    assert copy == module.replace(command, trigger=copy.trigger)
+    assert copy.trigger != command.trigger
+    assert editor.state.previews == [copy]
+    assert not widget.capture_active
+
+
+def test_mouse_parent_rejection_preserves_every_draft_field(editor):
+    widget, state = editor.widget, editor.state
+    widget.action_var.set("Mouse movement")
+    widget.dx_var.set("-80")
+    widget.dy_var.set("35")
+    state.accept = False
+    assert not widget.apply_pending()
+    assert widget.action_var.get() == "Mouse movement"
+    assert widget.dx_var.get() == "-80"
+    assert widget.dy_var.get() == "35"
+    assert widget.commands[0].action_type == "key"
+    assert widget.dirty
+    state.accept = True
+    assert widget.apply_pending()
+    assert (widget.commands[0].dx, widget.commands[0].dy) == (-80, 35)
+
+
+def test_mouse_search_and_compact_table_are_readable_without_losing_selected_draft(editor):
+    widget = editor.widget
+    widget.set_commands((
+        Command("!look", action_type="mouse_move", dx=-100, dy=100),
+        Command("!fire", action_type="mouse_button", button="x1"),
+        Command("!next", action_type="mouse_wheel", wheel=3),
+    ))
+    widget.dx_var.set("-50")
+    widget.filter_var.set("side button")
+    editor.root.update()
+    assert widget.tree.get_children() == ("!fire",)
+    assert widget.selected_trigger == "!look"
+    assert widget.dirty
+    widget.filter_var.set("mouse movement")
+    editor.root.update()
+    assert widget.tree.get_children() == ("!look",)
+    assert widget.tree.item("!look", "values")[1] == "Move (-100, +100)"
+    assert widget.tree.heading("key", "text") == "Game action"
+    assert widget.apply_pending()
+    assert widget.commands[0].dx == -50
+
+
+def test_mouse_movement_keyboard_apply_and_default_preview_copy(editor):
+    widget = editor.widget
+    widget.action_var.set("Mouse movement")
+    widget.dy_var.set("-10")
+    editor.root.focus_force()
+    widget.dy_entry.focus_force()
+    editor.root.update()
+    widget.dy_entry.event_generate("<Return>")
+    editor.root.update()
+    assert not widget.dirty
+    assert widget.commands[0].dy == -10
+    widget._on_preview = lambda _command: None
+    widget.preview_command()
+    assert "No keyboard or mouse input" in widget.preview_var.get()

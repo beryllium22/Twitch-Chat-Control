@@ -13,6 +13,23 @@ from typing import Any, Callable, Protocol
 from .models import Command, Profile, normalize_command
 
 
+class InputBlocked(RuntimeError):
+    """A recoverable native mouse guard rejection; the session still disarms.
+
+    Backends use only these fixed codes. Send failures and uncertain releases
+    remain ordinary exceptions and permanently disable live input until restart.
+    """
+
+    REASONS = frozenset({"mouse_pointer_outside_target", "mouse_move_outside_target",
+                         "physical_mouse_button_held", "mouse_capture_unsafe"})
+
+    def __init__(self, reason: str) -> None:
+        if type(reason) is not str or reason not in self.REASONS:
+            raise ValueError("Unsupported native input guard reason.")
+        self.reason = reason
+        super().__init__(reason)
+
+
 class InputBackend(Protocol):
     @property
     def target_selected(self) -> bool: ...
@@ -22,6 +39,10 @@ class InputBackend(Protocol):
     def physical_modifiers_down(self) -> bool: ...
     def key_down(self, key: str) -> None: ...
     def key_up(self, key: str) -> None: ...
+    def mouse_button_down(self, button: str) -> None: ...
+    def mouse_button_up(self, button: str) -> None: ...
+    def mouse_move(self, dx: int, dy: int) -> None: ...
+    def mouse_wheel(self, steps: int) -> None: ...
     def release_all(self) -> bool | None: ...
     def bind_live_session(self, live: bool) -> None: ...
 
@@ -54,6 +75,7 @@ class EngineSnapshot:
     rejected: int
     pending_seconds: float
     backend_fault: bool
+    active_action: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -132,10 +154,11 @@ class SafetyEngine:
     def snapshot(self) -> EngineSnapshot:
         with self._lock:
             return EngineSnapshot(self._state, self._preview, self._connected, self._reason,
-                                  len(self._queue), self._active.command.key if self._active else None,
+                                  len(self._queue), self._active.command.key if self._active and self._active.command.action_type == "key" else None,
                                   self._accepted, self._rejected,
                                   max(0.0, self._pending_until - self._clock()) if self._state == "pending" else 0.0,
-                                  self._faulted)
+                                  self._faulted,
+                                  self._active.command.action_label if self._active else None)
 
     def _emit(self, kind: str, reason: str, command: str = "", user_id: str = "") -> None:
         if self._on_event is None:
@@ -411,7 +434,10 @@ class SafetyEngine:
             if self._active and now >= self._release_at:
                 action = self._active
                 try:
-                    self.backend.key_up(action.command.key)
+                    if action.command.action_type == "key":
+                        self.backend.key_up(action.command.key)
+                    else:
+                        self.backend.mouse_button_up(action.command.button)
                 except Exception:
                     self._faulted = True
                     self._disarm("input_release_failed_restart_required")
@@ -419,8 +445,9 @@ class SafetyEngine:
                 self._active = None
                 self._release_at = 0.0
                 self._next_execution_at = max(self._next_execution_at, now + self.RELEASE_GAP_SECONDS)
-                self._emit("released", "tap_finished", action.command.trigger, action.user_id)
-            # Discard stale work even when a key is held; never replay a backlog.
+                self._emit("released", "mouse_button_released" if action.command.is_mouse else "tap_finished",
+                           action.command.trigger, action.user_id)
+            # Discard stale work even when a key/button is held; never replay a backlog.
             while self._queue and (self._queue[0].expires_at <= now or self._queue[0].generation != self._generation):
                 action = self._queue.popleft()
                 self._emit("dropped", "queue_expired", action.command.trigger, action.user_id)
@@ -429,7 +456,9 @@ class SafetyEngine:
             action = self._queue.popleft()
             if self._preview:
                 self._next_execution_at = now + self._profile.global_cooldown_ms / 1000
-                self._emit("preview", "would_tap", action.command.trigger, action.user_id)
+                reason = {"key": "would_tap", "mouse_button": "would_press_mouse_button",
+                          "mouse_move": "would_move_mouse", "mouse_wheel": "would_scroll_mouse"}[action.command.action_type]
+                self._emit("preview", reason, action.command.trigger, action.user_id)
                 return
             # Last guard directly before the native API; the native backend
             # checks independently again immediately before SendInput.
@@ -438,12 +467,28 @@ class SafetyEngine:
                 self._disarm(reason)
                 return
             try:
-                self.backend.key_down(action.command.key)
+                command = action.command
+                if command.action_type == "key":
+                    self.backend.key_down(command.key)
+                elif command.action_type == "mouse_button":
+                    self.backend.mouse_button_down(command.button)
+                elif command.action_type == "mouse_move":
+                    self.backend.mouse_move(command.dx, command.dy)
+                elif command.action_type == "mouse_wheel":
+                    self.backend.mouse_wheel(command.wheel)
+                else:
+                    raise RuntimeError("Unsupported validated action.")
+            except InputBlocked as error:
+                self._disarm(error.reason)
+                return
             except Exception:
                 self._faulted = True
                 self._disarm("input_failed_restart_required")
                 return
-            self._active = action
-            self._release_at = now + action.command.hold_ms / 1000
+            if action.command.is_held:
+                self._active = action
+                self._release_at = now + action.command.hold_ms / 1000
             self._next_execution_at = now + self._profile.global_cooldown_ms / 1000
-            self._emit("executed", "key_down", action.command.trigger, action.user_id)
+            reason = {"key": "key_down", "mouse_button": "mouse_button_down",
+                      "mouse_move": "mouse_moved", "mouse_wheel": "mouse_scrolled"}[action.command.action_type]
+            self._emit("executed", reason, action.command.trigger, action.user_id)

@@ -216,7 +216,7 @@ def test_preview_simulator_runs_through_policy_without_native_keys(gui):
     assert app.engine.snapshot().accepted == 1
     app.engine.tick()
     app._pump()
-    assert "No keyboard input was sent." in app.log.get("1.0", "end")
+    assert "No keyboard or mouse input was sent." in app.log.get("1.0", "end")
     assert not any(event[0] in {"down", "up"} for event in gui.backend.events)
     assert not gui.clients
 

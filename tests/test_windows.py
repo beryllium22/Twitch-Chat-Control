@@ -9,6 +9,7 @@ from dataclasses import replace
 import pytest
 
 from twitch_chat_control.windows import (
+    GUITHREADINFO,
     INPUT,
     INPUT_UNION,
     KEY_VK,
@@ -413,6 +414,14 @@ def test_native_win32_declarations_with_read_only_calls():
     assert isinstance(api.foreground_window(), int)
     assert isinstance(api.input_desktop_active(), bool)
     assert isinstance(api.enumerate_windows(), list)
+    point = api.cursor_position()
+    assert point is None or (len(point) == 2 and all(type(value) is int for value in point))
+    if point is not None:
+        assert isinstance(api.root_window_at(point), int)
+    rect = api.client_bounds(api.foreground_window())
+    assert rect is None or (len(rect) == 4 and all(type(value) is int for value in rect))
+    info = GUITHREADINFO(cbSize=ctypes.sizeof(GUITHREADINFO))
+    assert isinstance(api.user32.GetGUIThreadInfo(0, ctypes.byref(info)), int)
 
 
 class ChangingLayoutUser32:

@@ -17,6 +17,19 @@ LABEL_KEYS = {label: key for key, label in KEY_LABELS.items()}
 KEY_CHOICES = tuple(KEY_LABELS[key] for key in ("space", "up", "down", "left", "right")) + tuple(
     KEY_LABELS[key] for key in sorted(SAFE_KEYS) if len(key) == 1
 )
+ACTION_LABELS = {"key": "Keyboard key", "mouse_button": "Mouse button",
+                 "mouse_move": "Mouse movement", "mouse_wheel": "Mouse wheel"}
+LABEL_ACTIONS = {label: value for value, label in ACTION_LABELS.items()}
+BUTTON_LABELS = {"left": "Left mouse", "right": "Right mouse", "middle": "Middle mouse",
+                 "x1": "Side button 1", "x2": "Side button 2"}
+LABEL_BUTTONS = {label: value for value, label in BUTTON_LABELS.items()}
+
+
+def action_label(command: Command, *, compact: bool = False) -> str:
+    """Describe the approved action without exposing implementation fields."""
+    if compact and command.action_type == "mouse_move":
+        return f"Move ({command.dx:+}, {command.dy:+})"
+    return command.action_label
 # Tk uses different Alt/Meta masks on X11 and Windows. Lock/NumLock are not chords.
 _MODIFIER_MASK = 0x0001 | 0x0004 | 0x0008 | 0x0020 | 0x0040 | 0x0080 | 0x20000
 
@@ -82,9 +95,16 @@ class CommandEditor(ttk.Frame):
         self._layout_owner = self.winfo_toplevel()
         self._column_metrics_key: tuple[Any, ...] | None = None
         self._column_widths: tuple[int, ...] | None = None
+        self._shown_action: str | None = None
 
         self.trigger_var = tk.StringVar()
+        self.action_var = tk.StringVar(value=ACTION_LABELS["key"])
         self.key_var = tk.StringVar(value="Space")
+        self.button_var = tk.StringVar(value=BUTTON_LABELS["left"])
+        self.dx_var = tk.StringVar(value="25")
+        self.dy_var = tk.StringVar(value="0")
+        self.wheel_direction_var = tk.StringVar(value="Up")
+        self.wheel_steps_var = tk.StringVar(value="1")
         self.hold_var = tk.StringVar(value="100")
         self.cooldown_var = tk.StringVar(value="500")
         self.enabled_var = tk.BooleanVar(value=True)
@@ -99,7 +119,9 @@ class CommandEditor(ttk.Frame):
         self.capture_var = tk.StringVar()
         self.preview_var = tk.StringVar()
         self._build()
-        for var in (self.trigger_var, self.key_var, self.hold_var, self.cooldown_var, self.enabled_var):
+        for var in (self.trigger_var, self.action_var, self.key_var, self.button_var, self.dx_var, self.dy_var,
+                    self.wheel_direction_var, self.wheel_steps_var, self.hold_var,
+                    self.cooldown_var, self.enabled_var):
             var.trace_add("write", self._draft_changed)
         self.filter_var.trace_add("write", self._filter_changed)
         self.bind("<Unmap>", self._capture_unmapped)
@@ -151,7 +173,7 @@ class CommandEditor(ttk.Frame):
         table.grid(row=2, column=0, sticky="nsew")
         self.tree = ttk.Treeview(table, columns=("trigger", "key", "enabled"),
                                  show="headings", selectmode="browse", height=6)
-        for name, label, width in (("trigger", "Chat command", 120), ("key", "Game key", 85),
+        for name, label, width in (("trigger", "Chat command", 120), ("key", "Game action", 115),
                                    ("enabled", "Status", 74)):
             self.tree.heading(name, text=label)
             self.tree.column(name, width=width, minwidth=width, stretch=name == "trigger", anchor="w")
@@ -187,13 +209,22 @@ class CommandEditor(ttk.Frame):
         self.trigger_entry.grid(row=1, column=0, columnspan=2, sticky="ew", pady=(4, 3))
         ttk.Label(form, text="Start with !, for example !jump or !left.", style="CardMuted.TLabel").grid(
             row=2, column=0, columnspan=2, sticky="w", pady=(0, 10))
-        ttk.Label(form, text="Game key", style="Card.TLabel").grid(row=3, column=0, columnspan=2, sticky="w")
-        self.key_combo = ttk.Combobox(form, textvariable=self.key_var, values=KEY_CHOICES, state="readonly", width=12)
-        self.key_combo.grid(row=4, column=0, sticky="ew", pady=(4, 10), padx=(0, 8))
-        self.capture_button = ttk.Button(form, text="Press a key", command=self.start_capture)
-        self.capture_button.grid(row=4, column=1, sticky="ew", pady=(4, 10))
-        self.capture_row = ttk.Frame(form, style="Card.TFrame")
-        self.capture_row.grid(row=5, column=0, columnspan=2, sticky="ew", pady=(0, 10))
+        ttk.Label(form, text="Game action", style="Card.TLabel").grid(row=3, column=0, columnspan=2, sticky="w")
+        self.action_combo = ttk.Combobox(form, textvariable=self.action_var, values=tuple(ACTION_LABELS.values()),
+                                         state="readonly", width=18)
+        self.action_combo.grid(row=4, column=0, columnspan=2, sticky="ew", pady=(4, 10))
+
+        self.key_fields = ttk.Frame(form, style="Card.TFrame")
+        self.key_fields.grid(row=5, column=0, columnspan=2, sticky="ew")
+        self.key_fields.columnconfigure(0, weight=1)
+        self.key_fields.columnconfigure(1, weight=1)
+        ttk.Label(self.key_fields, text="Game key", style="Card.TLabel").grid(row=0, column=0, columnspan=2, sticky="w")
+        self.key_combo = ttk.Combobox(self.key_fields, textvariable=self.key_var, values=KEY_CHOICES, state="readonly", width=12)
+        self.key_combo.grid(row=1, column=0, sticky="ew", pady=(4, 10), padx=(0, 8))
+        self.capture_button = ttk.Button(self.key_fields, text="Press a key", command=self.start_capture)
+        self.capture_button.grid(row=1, column=1, sticky="ew", pady=(4, 10))
+        self.capture_row = ttk.Frame(self.key_fields, style="Card.TFrame")
+        self.capture_row.grid(row=2, column=0, columnspan=2, sticky="ew", pady=(0, 10))
         self.capture_row.columnconfigure(0, weight=1)
         self.capture_entry = ttk.Entry(self.capture_row, textvariable=self.capture_var,
                                        state="readonly", takefocus=False, width=20)
@@ -207,17 +238,65 @@ class CommandEditor(ttk.Frame):
         self.capture_entry.bind("<KeyPress>", self._capture_keypress)
         self.capture_entry.bind("<FocusOut>", self._capture_focus_lost)
         self.capture_entry.bind("<Unmap>", self._capture_unmapped)
-        ttk.Label(form, text="Hold time · ms", style="Card.TLabel").grid(row=6, column=0, sticky="w")
-        ttk.Label(form, text="Cooldown · ms", style="Card.TLabel").grid(row=6, column=1, sticky="w")
-        self.hold_entry = ttk.Spinbox(form, from_=10, to=450, increment=10, textvariable=self.hold_var, width=10)
-        self.hold_entry.grid(row=7, column=0, sticky="ew", padx=(0, 8), pady=(4, 3))
-        self.cooldown_entry = ttk.Spinbox(form, from_=0, to=60_000, increment=100, textvariable=self.cooldown_var, width=10)
-        self.cooldown_entry.grid(row=7, column=1, sticky="ew", pady=(4, 3))
-        ttk.Label(form, text="10 to 450 ms per press", style="CardMuted.TLabel").grid(row=8, column=0, sticky="w")
-        ttk.Label(form, text="0 to 60,000 ms between uses", style="CardMuted.TLabel").grid(row=8, column=1, sticky="w")
+        self.button_fields = ttk.Frame(form, style="Card.TFrame")
+        self.button_fields.grid(row=5, column=0, columnspan=2, sticky="ew")
+        self.button_fields.columnconfigure(0, weight=1)
+        ttk.Label(self.button_fields, text="Mouse button", style="Card.TLabel").grid(row=0, column=0, sticky="w")
+        self.button_combo = ttk.Combobox(self.button_fields, textvariable=self.button_var,
+                                         values=tuple(BUTTON_LABELS.values()), state="readonly", width=18)
+        self.button_combo.grid(row=1, column=0, sticky="ew", pady=(4, 10))
+
+        self.move_fields = ttk.Frame(form, style="Card.TFrame")
+        self.move_fields.grid(row=5, column=0, columnspan=2, sticky="ew")
+        self.move_fields.columnconfigure(0, weight=1)
+        self.move_fields.columnconfigure(1, weight=1)
+        ttk.Label(self.move_fields, text="Horizontal · units", style="Card.TLabel").grid(row=0, column=0, sticky="w")
+        ttk.Label(self.move_fields, text="Vertical · units", style="Card.TLabel").grid(row=0, column=1, sticky="w")
+        self.dx_entry = ttk.Spinbox(self.move_fields, from_=-100, to=100, increment=5,
+                                    textvariable=self.dx_var, width=10)
+        self.dy_entry = ttk.Spinbox(self.move_fields, from_=-100, to=100, increment=5,
+                                    textvariable=self.dy_var, width=10)
+        self.dx_entry.grid(row=1, column=0, sticky="ew", padx=(0, 8), pady=(4, 3))
+        self.dy_entry.grid(row=1, column=1, sticky="ew", pady=(4, 3))
+        ttk.Label(self.move_fields, text="Left -  /  right +", style="CardMuted.TLabel").grid(row=2, column=0, sticky="w")
+        ttk.Label(self.move_fields, text="Up -  /  down +", style="CardMuted.TLabel").grid(row=2, column=1, sticky="w")
+        ttk.Label(self.move_fields, text="-100 to 100 per axis; at least one must move. Relative input units, not pixels: game and Windows sensitivity affect distance.",
+                  style="CardMuted.TLabel", wraplength=340).grid(row=3, column=0, columnspan=2, sticky="w", pady=(7, 10))
+
+        self.wheel_fields = ttk.Frame(form, style="Card.TFrame")
+        self.wheel_fields.grid(row=5, column=0, columnspan=2, sticky="ew")
+        self.wheel_fields.columnconfigure(0, weight=1)
+        self.wheel_fields.columnconfigure(1, weight=1)
+        ttk.Label(self.wheel_fields, text="Wheel direction", style="Card.TLabel").grid(row=0, column=0, sticky="w")
+        ttk.Label(self.wheel_fields, text="Steps", style="Card.TLabel").grid(row=0, column=1, sticky="w")
+        self.wheel_direction_combo = ttk.Combobox(self.wheel_fields, textvariable=self.wheel_direction_var,
+                                                  values=("Up", "Down"), state="readonly", width=10)
+        self.wheel_steps_entry = ttk.Spinbox(self.wheel_fields, from_=1, to=3, increment=1,
+                                             textvariable=self.wheel_steps_var, width=10)
+        self.wheel_direction_combo.grid(row=1, column=0, sticky="ew", padx=(0, 8), pady=(4, 10))
+        self.wheel_steps_entry.grid(row=1, column=1, sticky="ew", pady=(4, 10))
+
+        self.hold_fields = ttk.Frame(form, style="Card.TFrame")
+        self.hold_fields.grid(row=6, column=0, sticky="ew", padx=(0, 8))
+        self.hold_fields.columnconfigure(0, weight=1)
+        ttk.Label(self.hold_fields, text="Hold time · ms", style="Card.TLabel").grid(row=0, column=0, sticky="w")
+        self.hold_entry = ttk.Spinbox(self.hold_fields, from_=10, to=450, increment=10, textvariable=self.hold_var, width=10)
+        self.hold_entry.grid(row=1, column=0, sticky="ew", pady=(4, 3))
+        ttk.Label(self.hold_fields, text="10 to 450 ms per press", style="CardMuted.TLabel").grid(row=2, column=0, sticky="w")
+        self.cooldown_fields = ttk.Frame(form, style="Card.TFrame")
+        self.cooldown_fields.grid(row=6, column=1, sticky="ew")
+        self.cooldown_fields.columnconfigure(0, weight=1)
+        ttk.Label(self.cooldown_fields, text="Cooldown · ms", style="Card.TLabel").grid(row=0, column=0, sticky="w")
+        self.cooldown_entry = ttk.Spinbox(self.cooldown_fields, from_=0, to=60_000, increment=100,
+                                          textvariable=self.cooldown_var, width=10)
+        self.cooldown_entry.grid(row=1, column=0, sticky="ew", pady=(4, 3))
+        ttk.Label(self.cooldown_fields, text="0 to 60,000 ms between uses", style="CardMuted.TLabel").grid(row=2, column=0, sticky="w")
+        self.mouse_hint = ttk.Label(form, text="Live mouse actions require the pointer over the selected game's play area. Preview never moves or clicks your mouse.",
+                                    style="CardMuted.TLabel", wraplength=340)
+        self.mouse_hint.grid(row=7, column=0, columnspan=2, sticky="w", pady=(9, 0))
         self.enabled_check = ttk.Checkbutton(form, text="Enable this command", variable=self.enabled_var,
                                              style="Card.TCheckbutton")
-        self.enabled_check.grid(row=9, column=0, columnspan=2, sticky="w", pady=(8, 0))
+        self.enabled_check.grid(row=8, column=0, columnspan=2, sticky="w", pady=(8, 0))
         self.summary_label = ttk.Label(right, textvariable=self.summary_var, style="CardMuted.TLabel", wraplength=390)
         self.summary_label.grid(row=3, column=0, sticky="ew", pady=(8, 8))
         self.error_label = ttk.Label(right, textvariable=self.error_var, style="Card.TLabel",
@@ -235,14 +314,15 @@ class CommandEditor(ttk.Frame):
         self.preview_label.grid(row=6, column=0, sticky="ew", pady=(10, 0))
         self.empty_detail = ttk.Frame(right, style="Card.TFrame", padding=(0, 16, 0, 32))
         self.empty_detail.grid(row=2, column=0, rowspan=5, sticky="new")
-        ttk.Label(self.empty_detail, text="Give chat one simple action at a time.\n\nFor example, !jump can press Space.",
+        ttk.Label(self.empty_detail, text="Give chat one simple action at a time.\n\nTry !jump for Space or !lookright for a small mouse movement.",
                   style="CardMuted.TLabel", wraplength=340, justify="left").pack(anchor="w", pady=(0, 18))
         ttk.Button(self.empty_detail, text="Create first command", style="Accent.TButton", command=self.new_command).pack(anchor="w")
         self.error_var.trace_add("write", self._feedback_changed)
         self.preview_var.trace_add("write", self._feedback_changed)
-        for field in (self.trigger_entry, self.hold_entry, self.cooldown_entry):
+        for field in (self.trigger_entry, self.hold_entry, self.cooldown_entry,
+                      self.dx_entry, self.dy_entry, self.wheel_steps_entry):
             field.bind("<Return>", self._apply_from_keyboard)
-        for field in (self.trigger_entry, self.key_combo, self.hold_entry, self.cooldown_entry):
+        for field in self._form_widgets():
             field.bind("<FocusOut>", self._field_left, add="+")
         self._left_card, self._right_card = left, right
         for widget in (self, left, right):
@@ -251,13 +331,34 @@ class CommandEditor(ttk.Frame):
         self.bind("<Destroy>", self._layout_destroyed, add="+")
         self._schedule_layout()
 
+    def _form_widgets(self) -> tuple[ttk.Widget, ...]:
+        return (self.trigger_entry, self.action_combo, self.key_combo, self.button_combo,
+                self.dx_entry, self.dy_entry, self.wheel_direction_combo, self.wheel_steps_entry,
+                self.hold_entry, self.cooldown_entry)
+
+    def _show_action_fields(self) -> None:
+        action = LABEL_ACTIONS.get(self.action_var.get(), "")
+        if action == self._shown_action:
+            return
+        self._shown_action = action
+        if action != "key":
+            self.cancel_capture()
+        for kind, widget in (("key", self.key_fields), ("mouse_button", self.button_fields),
+                             ("mouse_move", self.move_fields), ("mouse_wheel", self.wheel_fields)):
+            widget.grid() if kind == action else widget.grid_remove()
+        timed = action in {"key", "mouse_button"}
+        self.hold_fields.grid() if timed else self.hold_fields.grid_remove()
+        self.cooldown_fields.grid_configure(column=1 if timed else 0, columnspan=1 if timed else 2)
+        self.mouse_hint.grid() if action.startswith("mouse_") else self.mouse_hint.grid_remove()
+        self._schedule_layout()
+
     def _size_table_columns(self) -> bool:
         """Keep complete headings and key/status labels readable at larger text sizes."""
         style = ttk.Style(self)
         body_spec = style.lookup("Treeview", "font") or "TkDefaultFont"
         heading_spec = style.lookup("Treeview.Heading", "font") or body_spec
         metrics_key = (str(body_spec), str(heading_spec), self.tk.call("tk", "scaling"),
-                       tuple(command.trigger for command in self._commands))
+                       tuple((command.trigger, action_label(command, compact=True)) for command in self._commands))
         if metrics_key == self._column_metrics_key:
             return False
         self._column_metrics_key = metrics_key
@@ -265,7 +366,8 @@ class CommandEditor(ttk.Frame):
         heading = tkfont.Font(root=self, font=heading_spec)
         columns = (
             ("trigger", "Chat command", 120, (command.trigger for command in self._commands)),
-            ("key", "Game key", 85, KEY_LABELS.values()),
+            ("key", "Game action", 115,
+             (*KEY_LABELS.values(), *BUTTON_LABELS.values(), "Move (-100, +100)", "Wheel down 3")),
             ("enabled", "Status", 74, ("Enabled", "Disabled")),
         )
         widths = tuple(max(minimum, heading.measure(label) + 24,
@@ -360,7 +462,14 @@ class CommandEditor(ttk.Frame):
             self._validate_draft()
 
     def _values(self) -> tuple[Any, ...]:
-        return (self.trigger_var.get(), self.key_var.get(), self.hold_var.get(),
+        action = LABEL_ACTIONS.get(self.action_var.get())
+        fields = {
+            "key": (self.key_var, self.hold_var),
+            "mouse_button": (self.button_var, self.hold_var),
+            "mouse_move": (self.dx_var, self.dy_var),
+            "mouse_wheel": (self.wheel_direction_var, self.wheel_steps_var),
+        }.get(action, ())
+        return (self.trigger_var.get(), self.action_var.get(), tuple(var.get() for var in fields),
                 self.cooldown_var.get(), self.enabled_var.get())
 
     def _pause(self) -> bool:
@@ -376,6 +485,7 @@ class CommandEditor(ttk.Frame):
     def _draft_changed(self, *_args: Any) -> None:
         if self._loading:
             return
+        self._show_action_fields()
         self._dirty = self._new or self._values() != self._baseline
         self.preview_var.set("")
         if not self._pause():
@@ -387,7 +497,7 @@ class CommandEditor(ttk.Frame):
 
     def _validate_draft(self) -> Command | None:
         self._invalid_widget = None
-        for widget in (self.trigger_entry, self.key_combo, self.hold_entry, self.cooldown_entry):
+        for widget in self._form_widgets():
             widget.state(["!invalid"])
         trigger = self.trigger_var.get()
         error = ""
@@ -397,28 +507,54 @@ class CommandEditor(ttk.Frame):
         elif any(command.trigger == trigger and command.trigger != self._selected_trigger for command in self._commands):
             error = "Chat command: that name is already assigned. Choose a unique name."
             self._invalid_widget = self.trigger_entry
-        key = LABEL_KEYS.get(self.key_var.get())
-        if not error and key is None:
+        action = LABEL_ACTIONS.get(self.action_var.get())
+        if not error and action is None:
+            error = "Game action: choose a keyboard or mouse action from the list."
+            self._invalid_widget = self.action_combo
+        key = LABEL_KEYS.get(self.key_var.get()) if action == "key" else ""
+        if not error and action == "key" and key is None:
             error = "Game key: choose a letter, number, arrow, or Space from the list."
             self._invalid_widget = self.key_combo
-        numbers: dict[str, int] = {}
-        for label, var, low, high in (("Hold", self.hold_var, 10, 450), ("Cooldown", self.cooldown_var, 0, 60_000)):
+        button = LABEL_BUTTONS.get(self.button_var.get()) if action == "mouse_button" else ""
+        if not error and action == "mouse_button" and button is None:
+            error = "Mouse button: choose a button from the list."
+            self._invalid_widget = self.button_combo
+        if not error and action == "mouse_wheel" and self.wheel_direction_var.get() not in {"Up", "Down"}:
+            error = "Wheel direction: choose Up or Down."
+            self._invalid_widget = self.wheel_direction_combo
+        numbers: dict[str, int] = {"Hold": 100, "Horizontal": 0, "Vertical": 0, "Steps": 0}
+        fields = [("Cooldown", self.cooldown_var, self.cooldown_entry, 0, 60_000, " ms")]
+        if action in {"key", "mouse_button"}:
+            fields.insert(0, ("Hold", self.hold_var, self.hold_entry, 10, 450, " ms"))
+        elif action == "mouse_move":
+            fields[0:0] = [("Horizontal", self.dx_var, self.dx_entry, -100, 100, " units"),
+                           ("Vertical", self.dy_var, self.dy_entry, -100, 100, " units")]
+        elif action == "mouse_wheel":
+            fields.insert(0, ("Steps", self.wheel_steps_var, self.wheel_steps_entry, 1, 3, ""))
+        for label, var, widget, low, high, units in fields:
             raw = var.get()
-            if len(raw) > 6 or not raw.isascii() or not raw.isdecimal() or not low <= int(raw) <= high:
+            digits = raw[1:] if low < 0 and raw.startswith(("-", "+")) else raw
+            if len(raw) > 6 or not raw.isascii() or not digits.isdecimal() or not low <= int(raw) <= high:
                 if not error:
-                    error = f"{label}: enter a whole number from {low:,} to {high:,} ms."
-                    self._invalid_widget = self.hold_entry if label == "Hold" else self.cooldown_entry
+                    error = f"{label}: enter a whole number from {low:,} to {high:,}{units}."
+                    self._invalid_widget = widget
             else:
                 numbers[label] = int(raw)
+        if not error and action == "mouse_move" and numbers["Horizontal"] == numbers["Vertical"] == 0:
+            error = "Mouse movement: set Horizontal or Vertical to a nonzero value."
+            self._invalid_widget = self.dx_entry
         if error:
             self.error_var.set(error)
             if self._invalid_widget is not None:
                 self._invalid_widget.state(["invalid"])
             return None
         try:
-            candidate = Command(trigger, key, numbers["Hold"], numbers["Cooldown"], self.enabled_var.get())
+            wheel = numbers["Steps"] * (1 if self.wheel_direction_var.get() == "Up" else -1) if action == "mouse_wheel" else 0
+            candidate = Command(trigger, key, numbers["Hold"], numbers["Cooldown"], self.enabled_var.get(),
+                                action_type=action, button=button, dx=numbers["Horizontal"],
+                                dy=numbers["Vertical"], wheel=wheel)
         except (ValueError, TypeError, tk.TclError):
-            self.error_var.set("The mapping is invalid. Review its command, key, and timings.")
+            self.error_var.set("The mapping is invalid. Review its command, game action, and limits.")
             return None
         self.error_var.set("")
         return candidate
@@ -430,7 +566,18 @@ class CommandEditor(ttk.Frame):
             return
         self.draft_var.set("Unapplied changes · Apply command when ready" if self._dirty else "Applied to this profile")
         if self.enabled_var.get():
-            self.summary_var.set(f"When chat sends {self.trigger_var.get()[:25]}, press {self.key_var.get()[:16]} for {self.hold_var.get()[:6]} ms.")
+            action = LABEL_ACTIONS.get(self.action_var.get())
+            if action == "key":
+                description = f"press {self.key_var.get()[:16]} for {self.hold_var.get()[:6]} ms"
+            elif action == "mouse_button":
+                description = f"press {self.button_var.get()[:20]} for {self.hold_var.get()[:6]} ms"
+            elif action == "mouse_move":
+                description = f"move the mouse by ({self.dx_var.get()[:6]}, {self.dy_var.get()[:6]}) relative units"
+            elif action == "mouse_wheel":
+                description = f"scroll {self.wheel_direction_var.get()[:4].lower()} {self.wheel_steps_var.get()[:2]} wheel step(s)"
+            else:
+                description = "use the selected game action"
+            self.summary_var.set(f"When chat sends {self.trigger_var.get()[:25]}, {description}.")
         else:
             self.summary_var.set("Disabled. Chat cannot use this command until you enable and apply it.")
         self.apply_button.state(["!disabled"] if self._dirty and not self._blocked else ["disabled"])
@@ -446,7 +593,13 @@ class CommandEditor(ttk.Frame):
         self._selected_trigger = None if new or command is None else command.trigger
         current = command or Command("!action", "space")
         self.trigger_var.set(current.trigger if command is not None else "")
-        self.key_var.set(KEY_LABELS[current.key])
+        self.action_var.set(ACTION_LABELS[current.action_type])
+        self.key_var.set(KEY_LABELS.get(current.key, "Space"))
+        self.button_var.set(BUTTON_LABELS.get(current.button, BUTTON_LABELS["left"]))
+        self.dx_var.set(str(current.dx) if current.action_type == "mouse_move" else "25")
+        self.dy_var.set(str(current.dy) if current.action_type == "mouse_move" else "0")
+        self.wheel_direction_var.set("Down" if current.wheel < 0 else "Up")
+        self.wheel_steps_var.set(str(abs(current.wheel)) if current.action_type == "mouse_wheel" else "1")
         self.hold_var.set(str(current.hold_ms))
         self.cooldown_var.set(str(current.cooldown_ms))
         self.enabled_var.set(current.enabled)
@@ -460,14 +613,19 @@ class CommandEditor(ttk.Frame):
         for widget in (self.form, self.summary_label, self.controls):
             widget.grid() if active else widget.grid_remove()
         self.empty_detail.grid_remove() if active else self.empty_detail.grid()
-        for widget in (self.trigger_entry, self.hold_entry, self.cooldown_entry, self.enabled_check, self.capture_button, self.apply_button, self.revert_button, self.preview_button):
+        for widget in (self.trigger_entry, self.hold_entry, self.cooldown_entry, self.dx_entry, self.dy_entry,
+                       self.wheel_steps_entry, self.enabled_check, self.capture_button, self.apply_button,
+                       self.revert_button, self.preview_button):
             widget.state(["!disabled"] if active else ["disabled"])
-        self.key_combo.configure(state="readonly" if active else "disabled")
+        for widget in (self.action_combo, self.key_combo, self.button_combo, self.wheel_direction_combo):
+            widget.configure(state="readonly" if active else "disabled")
         for widget in (self.duplicate_button, self.remove_button):
             widget.state(["!disabled"] if self._selected_trigger else ["disabled"])
-        for widget in (self.trigger_entry, self.key_combo, self.hold_entry, self.cooldown_entry):
+        for widget in self._form_widgets():
             widget.state(["!invalid"])
         self._invalid_widget = None
+        self._shown_action = None
+        self._show_action_fields()
         self._feedback_changed()
         self._summarize()
         self._schedule_layout()
@@ -475,7 +633,9 @@ class CommandEditor(ttk.Frame):
     def _render_table(self) -> None:
         query = self.filter_var.get().lower()[:80]
         visible = tuple(command for command in self._commands
-                        if not query or query in command.trigger.lower() or query in KEY_LABELS[command.key].lower())
+                        if not query or query in command.trigger.lower()
+                        or query in action_label(command).lower()
+                        or query in ACTION_LABELS[command.action_type].lower())
         wanted = {command.trigger for command in visible}
         for row in self.tree.get_children():
             if row not in wanted:
@@ -483,7 +643,7 @@ class CommandEditor(ttk.Frame):
         # Keep existing rows and selection identities instead of destroying and
         # recreating the whole table on every search or command-field edit.
         for index, command in enumerate(visible):
-            values = (command.trigger, KEY_LABELS[command.key], "Enabled" if command.enabled else "Disabled")
+            values = (command.trigger, action_label(command, compact=True), "Enabled" if command.enabled else "Disabled")
             if not self.tree.exists(command.trigger):
                 self.tree.insert("", index, iid=command.trigger, values=values)
             elif tuple(self.tree.item(command.trigger, "values")) != values:
@@ -499,7 +659,7 @@ class CommandEditor(ttk.Frame):
         if visible:
             self.empty_table.place_forget()
         else:
-            self.empty_var.set("No matches. Try a command name or a game key." if self._commands
+            self.empty_var.set("No matches. Try a command name or a game action." if self._commands
                                else "No commands yet.\nChoose New command to add one.")
             self.empty_table.place(relx=0.48, rely=0.5, anchor="center")
         self._restore_selection()
@@ -655,7 +815,8 @@ class CommandEditor(ttk.Frame):
         if self._capture_active:
             self.cancel_capture()
             return
-        if (not self._new and self._selected_trigger is None) or not self._pause():
+        if (LABEL_ACTIONS.get(self.action_var.get()) != "key"
+                or (not self._new and self._selected_trigger is None) or not self._pause()):
             return
         self._capture_active = True
         self.capture_var.set("Press one game key now...")
@@ -669,7 +830,8 @@ class CommandEditor(ttk.Frame):
         self.capture_var.set("")
         self.capture_row.grid_remove()
         self.capture_button.configure(text="Press a key")
-        self.capture_button.state(["!disabled"] if self._new or self._selected_trigger else ["disabled"])
+        self.capture_button.state(["!disabled"] if (self._new or self._selected_trigger)
+                                   and LABEL_ACTIONS.get(self.action_var.get()) == "key" else ["disabled"])
 
     def _capture_focus_lost(self, _event: Any) -> None:
         # A queued FocusOut from a previous capture must not cancel a newly
@@ -716,4 +878,4 @@ class CommandEditor(ttk.Frame):
         except Exception:
             self.preview_var.set("Preview could not run. Controls remain disarmed.")
             return
-        self.preview_var.set(result[:300] if isinstance(result, str) else "Preview requested. No keyboard input is sent.")
+        self.preview_var.set(result[:300] if isinstance(result, str) else "Preview requested. No keyboard or mouse input is sent.")

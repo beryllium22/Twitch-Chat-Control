@@ -1,6 +1,6 @@
 # Twitch Chat Control
 
-A Windows desktop app that lets a streamer connect their own Twitch channel and map exact chat commands to short, allowlisted game key presses.
+A Windows desktop app that lets a streamer connect their own Twitch channel and map exact chat commands to bounded keyboard and mouse actions for games.
 
 **Development preview. Starts disarmed. Preview mode sends no input.** Live control requires an explicitly selected game window, a working local emergency hotkey, and a separate local arming action. Do not run as administrator.
 
@@ -18,11 +18,11 @@ Linux and macOS support the offline preview and automated tests; native game inp
 
 ## First session
 
-1. Start on **Session** with **Preview · no keyboard input** selected. Click **Start preview** in the bottom bar, choose `!jump` under **Try a chat command**, and click **Try command**. No Twitch account or game is needed.
+1. Start on **Session** with **Preview · no game input** selected. Click **Start preview** in the bottom bar, choose `!jump` under **Try a chat command**, and click **Try command**. No Twitch account or game is needed; Preview never moves the pointer, clicks, scrolls, or presses keys.
 2. Use **Edit commands** to make the starter controls your own. In **Controls & commands**, choose a **Blank**, **WASD movement**, or **Arrow-key movement** starting profile, or edit the current mappings. Click **Apply command**, then **Save profile**.
 3. Use **Who can play?** to review **Safety & access**. The default is **Moderators + you (recommended)**. Start with trusted participants and a comfortable command pace.
 4. When ready, select **Live game control · Windows** on **Session**. Twitch and game setup appear. Supply your own Public Client ID and channel, then select **Connect Twitch**. See [Twitch setup](docs/TWITCH_SETUP.md); no client secret is needed. Keep the temporary sign-in code off your stream.
-5. Open a game as a regular user, choose **Refresh windows**, and select its exact window. Read and check **I understand when to pause**. Click **Arm game control · 3 s** in the bottom bar, then focus the game before the countdown ends.
+5. Open a game as a regular user, choose **Refresh windows**, and select its exact window. Read and check **I understand when to pause**. Click **Arm game control · 3 s** in the bottom bar, then focus the game before the countdown ends. For mouse commands, place the pointer over the game's playable area, away from window borders, menus, and overlays.
 6. Use **Pause** or **F8** to stop. Losing game focus, disconnecting, or changing settings also stops control. Starting again always requires a local action.
 
 The bottom bar stays visible on every tab. It explains what is ready or missing and offers a link to the next setup step. **STOP ALL · F8** remains available at the top. To test actual chat without game input, stay in Preview and choose **Connect Twitch to test real chat...**.
@@ -30,8 +30,9 @@ The bottom bar stays visible on every tab. It explains what is ready or missing 
 ## Safety boundaries
 
 - Only exact configured commands are accepted. Chat cannot add commands, arm the app, change settings, run programs, access files, type arbitrary text, or provide key combinations.
-- Commands are one key at a time, with a hard duration limit and release watchdog. Mouse input, Enter, Tab, Escape, modifiers, function keys, and the Windows key are unavailable to chat.
+- Commands are one action at a time: an allowlisted key, a bounded mouse-button press, relative mouse movement, or vertical wheel scrolling. Keys and buttons have short hold limits and an independent release watchdog. Enter, Tab, Escape, modifiers, function keys, the Windows key, key combinations, absolute pointer placement, and drag macros are unavailable to chat.
 - Every action checks the foreground window and its bound process identity. Browsers, terminals, shell windows, elevated targets, and this app are rejected.
+- Mouse actions also check the pointer against the selected game's client area and window under the pointer. Starting a mouse action while a physical mouse button is held is blocked. Movement near an edge can be refused; the app does not lock the streamer's pointer into the game.
 - Per-viewer, per-command, global, and per-minute limits constrain floods. Queues and identity caches are bounded; stale and duplicate events are dropped.
 - Streamers control audience roles and optional Twitch user-ID allow/block lists. Verified Twitch metadata supplies roles, not chat text or display names. Shared-chat events from another channel are ignored.
 - No credentials ship in source or builds. No token files, environment-file loading, account database, network listener, telemetry, or automatic update system.
@@ -40,9 +41,20 @@ The bottom bar stays visible on every tab. It explains what is ready or missing 
 
 ## Profiles and everyday controls
 
-Configure mappings in **Controls & commands**; no JSON editing is required. **New command**, **Duplicate**, **Remove**, and **Enable this command** manage the list. Choose a **Game key** or use **Press a key** while the app has focus. Capture accepts only an unmodified letter, digit, arrow, or Space; **Cancel** or Escape ends capture and F8 stops control.
+Configure mappings in **Controls & commands**; no JSON editing is required. **New command**, **Duplicate**, **Remove**, and **Enable this command** manage the list. Choose an action type, then set the fields for that action:
 
-**Apply command** updates the current profile in memory. **Save profile** writes it to disk; **Save a copy...** chooses another file and **Open profile...** loads one. The app keeps applied changes separate from unsaved drafts and prompts before replacing or closing an edited profile. Invalid fields remain available for correction. Credentials, authorization, selected windows, and armed state are never saved.
+| Action | Configurable binding |
+| --- | --- |
+| Keyboard key | One letter, digit, arrow, or Space; hold 10–450 ms |
+| Mouse button | Left, right, middle, or either side button; hold 10–450 ms |
+| Mouse movement | Relative horizontal and vertical movement from −100 to 100 input units per axis; at least one axis must move |
+| Mouse wheel | Scroll up or down by 1–3 wheel steps |
+
+Each command has its own cooldown and shares the session's audience, viewer, global, and per-minute limits. For example, bind `!fire` to a short left-button press, `!lookleft` to a small leftward movement, and `!next` to one wheel step. Choose bindings that match the game. Windows pointer speed, acceleration, and game sensitivity affect movement; an input unit is not a guaranteed pixel or camera angle.
+
+Keyboard bindings also offer **Press a key** while the app has focus. Capture accepts only an unmodified allowed key; **Cancel** or Escape ends capture and F8 stops control. Mouse bindings use explicit selectors and numeric fields, so configuring them does not capture or send mouse input.
+
+**Apply command** updates the current profile in memory. **Save profile** writes it to disk; **Save a copy...** chooses another file and **Open profile...** loads one. The app keeps applied changes separate from unsaved drafts and prompts before replacing or closing an edited profile. Invalid fields remain available for correction. Existing keyboard profiles still load; adding a mouse binding upgrades that profile to schema 2, which requires v0.4.0 or later. Credentials, authorization, selected windows, and armed state are never saved.
 
 Use **Ctrl+S** to save, **Ctrl+Shift+S** to save a copy, **Ctrl+O** to open, and **Ctrl+1–4** or **Ctrl+Tab** to change tabs. Keyboard focus scrolls fields into view. No shortcut arms game input. Scrolling over a setting moves the page without accidentally changing its value; the command list and Activity scroll independently.
 

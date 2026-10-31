@@ -18,6 +18,9 @@ import time
 from dataclasses import dataclass
 from typing import Callable
 
+from .engine import InputBlocked
+from .models import MAX_MOUSE_MOVE, MAX_MOUSE_WHEEL
+
 DWORD = ctypes.c_uint32
 WORD = ctypes.c_uint16
 LONG = ctypes.c_int32
@@ -74,6 +77,18 @@ class POINT(ctypes.Structure):
     _fields_ = [("x", LONG), ("y", LONG)]
 
 
+class RECT(ctypes.Structure):
+    _fields_ = [("left", LONG), ("top", LONG), ("right", LONG), ("bottom", LONG)]
+
+
+class GUITHREADINFO(ctypes.Structure):
+    _fields_ = [
+        ("cbSize", DWORD), ("flags", DWORD), ("hwndActive", HWND),
+        ("hwndFocus", HWND), ("hwndCapture", HWND), ("hwndMenuOwner", HWND),
+        ("hwndMoveSize", HWND), ("hwndCaret", HWND), ("rcCaret", RECT),
+    ]
+
+
 class MSG(ctypes.Structure):
     _fields_ = [
         ("hwnd", HWND),
@@ -98,6 +113,21 @@ SAFE_KEYS = frozenset("abcdefghijklmnopqrstuvwxyz0123456789") | {"left", "right"
 KEY_VK = {key: ord(key.upper()) for key in SAFE_KEYS if len(key) == 1}
 KEY_VK.update(left=0x25, up=0x26, right=0x27, down=0x28, space=0x20)
 EXTENDED_KEYS = frozenset({"left", "up", "right", "down"})
+MOUSE_BUTTONS = {
+    # down flag, up flag, mouseData, virtual-key state
+    "left": (0x0002, 0x0004, 0, 0x01),
+    "right": (0x0008, 0x0010, 0, 0x02),
+    "middle": (0x0020, 0x0040, 0, 0x04),
+    "x1": (0x0080, 0x0100, 1, 0x05),
+    "x2": (0x0080, 0x0100, 2, 0x06),
+}
+MAX_MOUSE_DELTA = MAX_MOUSE_MOVE
+MAX_WHEEL_STEPS = MAX_MOUSE_WHEEL
+# MOUSEINPUT documents up to fourfold acceleration of relative movement. This
+# envelope reduces edge crossings; it cannot make SendInput window-targeted or
+# atomic with physical pointer movement, display changes, or game cursor warps.
+MOUSE_ACCELERATION_ENVELOPE = 4
+MOUSE_EDGE_MARGIN = 2
 MODIFIER_VKS = (
     0x10,
     0x11,
@@ -254,6 +284,7 @@ class _Win32API:
         self.wtsapi32 = ctypes.WinDLL("wtsapi32", use_last_error=True)
         self._enum_proc = ctypes.WINFUNCTYPE(BOOL, HWND, LPARAM)
         self._pressed_scan_codes: dict[str, tuple[int, int]] = {}
+        self._pressed_mouse_buttons: set[str] = set()
         self._bind()
 
     def _bind(self) -> None:
@@ -266,6 +297,12 @@ class _Win32API:
             (self.user32, "GetClassNameW", [HWND, ctypes.c_wchar_p, ctypes.c_int], ctypes.c_int),
             (self.user32, "GetWindowThreadProcessId", [HWND, ctypes.POINTER(DWORD)], DWORD),
             (self.user32, "GetForegroundWindow", [], HWND),
+            (self.user32, "GetCursorPos", [ctypes.POINTER(POINT)], BOOL),
+            (self.user32, "GetClientRect", [HWND, ctypes.POINTER(RECT)], BOOL),
+            (self.user32, "ClientToScreen", [HWND, ctypes.POINTER(POINT)], BOOL),
+            (self.user32, "WindowFromPoint", [POINT], HWND),
+            (self.user32, "GetAncestor", [HWND, UINT], HWND),
+            (self.user32, "GetGUIThreadInfo", [DWORD, ctypes.POINTER(GUITHREADINFO)], BOOL),
             (self.user32, "OpenInputDesktop", [DWORD, BOOL, DWORD], HANDLE),
             (self.user32, "CloseDesktop", [HANDLE], BOOL),
             (self.user32, "GetThreadDesktop", [DWORD], HANDLE),
@@ -474,6 +511,48 @@ class _Win32API:
     def key_pressed(self, vk: int) -> bool:
         return bool(self.user32.GetAsyncKeyState(vk) & 0x8000)
 
+    def cursor_position(self) -> tuple[int, int] | None:
+        point = POINT()
+        if not self.user32.GetCursorPos(ctypes.byref(point)):
+            return None
+        return int(point.x), int(point.y)
+
+    def client_bounds(self, hwnd: int) -> tuple[int, int, int, int] | None:
+        rect = RECT()
+        if not self.user32.GetClientRect(hwnd, ctypes.byref(rect)):
+            return None
+        first, last = POINT(rect.left, rect.top), POINT(rect.right, rect.bottom)
+        if not self.user32.ClientToScreen(hwnd, ctypes.byref(first)):
+            return None
+        if not self.user32.ClientToScreen(hwnd, ctypes.byref(last)):
+            return None
+        if first.x >= last.x or first.y >= last.y:
+            return None
+        # Negative coordinates are legitimate on monitors left of or above the
+        # primary display; right and bottom are exclusive.
+        return int(first.x), int(first.y), int(last.x), int(last.y)
+
+    def root_window_at(self, point: tuple[int, int]) -> int:
+        hwnd = self.user32.WindowFromPoint(POINT(*point))
+        return int(self.user32.GetAncestor(hwnd, 2) or 0) if hwnd else 0  # GA_ROOT
+
+    def mouse_routing_safe(self, target: WindowTarget) -> bool:
+        # GetCapture reports only the calling thread. Query the selected game's
+        # GUI thread instead, including native menu and move/resize modes.
+        if target.thread_id <= 0:
+            return False
+        info = GUITHREADINFO(cbSize=ctypes.sizeof(GUITHREADINFO))
+        if not self.user32.GetGUIThreadInfo(target.thread_id, ctypes.byref(info)):
+            return False
+        if info.flags & 0x1E or info.hwndMenuOwner or info.hwndMoveSize:
+            return False
+        if int(info.hwndActive or 0) != target.hwnd:
+            return False
+        for hwnd in (info.hwndFocus, info.hwndCapture):
+            if hwnd and int(self.user32.GetAncestor(hwnd, 2) or 0) != target.hwnd:
+                return False
+        return True
+
     def set_marker(self, hwnd: int, name: str, value: int) -> bool:
         return bool(self.user32.SetPropW(hwnd, name, value))
 
@@ -515,6 +594,41 @@ class _Win32API:
             self._pressed_scan_codes.pop(key, None)
         return success
 
+    def send_mouse_button(self, button: str, *, up: bool) -> bool:
+        if type(button) is not str or button not in MOUSE_BUTTONS:
+            return False
+        if up:
+            if button not in self._pressed_mouse_buttons:
+                return True
+        else:
+            if button in self._pressed_mouse_buttons:
+                return False
+            # Retain ownership before the attempt, including uncertain failures,
+            # so cleanup can retry exactly this button and no unrelated button.
+            self._pressed_mouse_buttons.add(button)
+        down_flag, up_flag, data, _ = MOUSE_BUTTONS[button]
+        packet = INPUT(type=0)
+        packet.mi = MOUSEINPUT(0, 0, data, up_flag if up else down_flag, 0, 0)
+        success = self.user32.SendInput(1, ctypes.byref(packet), ctypes.sizeof(INPUT)) == 1
+        if up and success:
+            self._pressed_mouse_buttons.discard(button)
+        return success
+
+    def send_mouse_move(self, dx: int, dy: int) -> bool:
+        if not _valid_mouse_delta(dx, dy):
+            return False
+        packet = INPUT(type=0)
+        packet.mi = MOUSEINPUT(dx, dy, 0, 0x0001, 0, 0)  # Relative MOVE only.
+        return self.user32.SendInput(1, ctypes.byref(packet), ctypes.sizeof(INPUT)) == 1
+
+    def send_mouse_wheel(self, steps: int) -> bool:
+        if not _valid_wheel_steps(steps):
+            return False
+        packet = INPUT(type=0)
+        # mouseData is a DWORD carrying the signed wheel delta's bit pattern.
+        packet.mi = MOUSEINPUT(0, 0, (steps * 120) & 0xFFFFFFFF, 0x0800, 0, 0)
+        return self.user32.SendInput(1, ctypes.byref(packet), ctypes.sizeof(INPUT)) == 1
+
     def register_panic(self) -> bool:
         return bool(self.user32.RegisterHotKey(None, HOTKEY_ID, 0x4000, VK_F8))
 
@@ -532,8 +646,18 @@ class _Win32API:
         return result
 
 
+def _valid_mouse_delta(dx: int, dy: int) -> bool:
+    return (type(dx) is int and type(dy) is int
+            and -MAX_MOUSE_DELTA <= dx <= MAX_MOUSE_DELTA
+            and -MAX_MOUSE_DELTA <= dy <= MAX_MOUSE_DELTA and (dx != 0 or dy != 0))
+
+
+def _valid_wheel_steps(steps: int) -> bool:
+    return type(steps) is int and 0 < abs(steps) <= MAX_WHEEL_STEPS
+
+
 class WindowsBackend:
-    """One locally selected, identity-bound window and one bounded key at a time.
+    """One locally selected, identity-bound window and one bounded action at a time.
 
     ``_api`` and ``_clock`` are dependency-injection seams for deterministic
     unit tests. They are not exposed by the UI or by imported profiles.
@@ -547,6 +671,8 @@ class WindowsBackend:
         self._marker_name = f"TwitchChatControl.{secrets.token_hex(16)}"
         self._marker_value = secrets.randbits(ctypes.sizeof(HANDLE) * 8 - 1) or 1
         self._held: dict[str, float] = {}
+        self._held_buttons: dict[str, float] = {}
+        self._mouse_session = False
         self._live = False
         self._healthy = True
         self._registered = False
@@ -631,6 +757,7 @@ class WindowsBackend:
     def select_target(self, target: WindowTarget | None) -> None:
         with self._lock:
             self._live = False
+            self._mouse_session = False
             self._release_locked()
             old = self._target
             self._target = None
@@ -689,6 +816,7 @@ class WindowsBackend:
         with self._lock:
             if not enabled:
                 self._live = False
+                self._mouse_session = False
                 self._release_locked()
                 return
             if not self.safety_ready or not self.is_target_foreground() or self.physical_modifiers_down():
@@ -706,7 +834,7 @@ class WindowsBackend:
                 reason = "That key is outside the game-input allowlist."
             elif not self._live or not self.safety_ready:
                 reason = "Live input is not armed."
-            elif self._held:
+            elif self._held or self._held_buttons:
                 reason = "Only one game key may be held at a time."
             elif not self.is_target_foreground():
                 reason = "The selected game lost focus or changed identity."
@@ -754,6 +882,135 @@ class WindowsBackend:
                 self._reason = "Windows could not release an input. Live control is disabled."
                 raise InputSafetyError(self._reason)
 
+    def _physical_mouse_down(self, *, ignore_owned: bool = False) -> bool:
+        return any(
+            self._api.key_pressed(values[3])
+            for button, values in MOUSE_BUTTONS.items()
+            if not ignore_owned or button not in self._held_buttons
+        )
+
+    def _mouse_target_check(self, dx: int = 0, dy: int = 0) -> None:
+        """Check current routing and a conservative relative-movement envelope.
+
+        This deliberately does not warp or confine the streamer's pointer. A
+        pointer/focus change can still race SendInput; every later mouse action
+        checks again and the monitor releases buttons if the pointer leaves.
+        """
+        target = self._target
+        if target is None or not self._api.mouse_routing_safe(target):
+            raise InputBlocked("mouse_capture_unsafe")
+        point = self._api.cursor_position()
+        rect = self._api.client_bounds(target.hwnd)
+        if point is None or rect is None:
+            raise InputBlocked("mouse_pointer_outside_target")
+        x, y = point
+        left, top, right, bottom = rect
+
+        def inside(px: int, py: int) -> bool:
+            return (left + MOUSE_EDGE_MARGIN <= px < right - MOUSE_EDGE_MARGIN
+                    and top + MOUSE_EDGE_MARGIN <= py < bottom - MOUSE_EDGE_MARGIN)
+
+        if not inside(x, y) or self._api.root_window_at(point) != target.hwnd:
+            raise InputBlocked("mouse_pointer_outside_target")
+        if dx or dy:
+            endpoint = (x + dx * MOUSE_ACCELERATION_ENVELOPE,
+                        y + dy * MOUSE_ACCELERATION_ENVELOPE)
+            # Check every corner of the displacement envelope, rather than only
+            # the unaccelerated destination. Both signs and secondary monitors
+            # use the same half-open client rectangle convention.
+            for px in (x, endpoint[0]):
+                for py in (y, endpoint[1]):
+                    if not inside(px, py) or self._api.root_window_at((px, py)) != target.hwnd:
+                        raise InputBlocked("mouse_move_outside_target")
+
+    def _mouse_preflight(self, dx: int = 0, dy: int = 0) -> None:
+        if not self._live or not self.safety_ready:
+            raise InputSafetyError("Live input is not armed.")
+        if self._held or self._held_buttons:
+            raise InputSafetyError("Only one game input may be held at a time.")
+        if not self.is_target_foreground():
+            raise InputSafetyError("The selected game lost focus or changed identity.")
+        if self.physical_modifiers_down():
+            raise InputSafetyError("A physical modifier key is held. Live input was paused.")
+        if self._physical_mouse_down():
+            raise InputBlocked("physical_mouse_button_held")
+        self._mouse_target_check(dx, dy)
+
+    def _mouse_failure(self, exc: Exception) -> None:
+        self._live = False
+        self._release_locked()
+        if isinstance(exc, (InputSafetyError, InputBlocked)):
+            raise exc
+        self._healthy = False
+        self._reason = "A native input error stopped live control. Restart the app."
+        raise InputSafetyError(self._reason) from None
+
+    def mouse_button_down(self, button: str) -> None:
+        with self._lock:
+            try:
+                if type(button) is not str or button not in MOUSE_BUTTONS:
+                    raise InputSafetyError("That mouse button is outside the game-input allowlist.")
+                self._mouse_preflight()
+                # Recheck adjacent to the insertion, as for the keyboard path.
+                self._mouse_preflight()
+                self._mouse_session = True
+                self._held_buttons[button] = self._clock() + MAX_HOLD_SECONDS
+                if not self._api.send_mouse_button(button, up=False):
+                    self._healthy = False
+                    self._reason = "Windows rejected an input event. Restart the app before live use."
+                    raise InputSafetyError(self._reason)
+                self._mouse_target_check()
+            except Exception as exc:
+                self._mouse_failure(exc)
+
+    def mouse_button_up(self, button: str) -> None:
+        with self._lock:
+            if type(button) is not str or button not in self._held_buttons:
+                return
+            try:
+                success = self._api.send_mouse_button(button, up=True)
+            except Exception:
+                success = False
+            if success:
+                self._held_buttons.pop(button, None)
+            else:
+                self._live = False
+                self._healthy = False
+                self._reason = "Windows could not release an input. Live control is disabled."
+                raise InputSafetyError(self._reason)
+
+    def mouse_move(self, dx: int, dy: int) -> None:
+        with self._lock:
+            try:
+                if not _valid_mouse_delta(dx, dy):
+                    raise InputSafetyError("Mouse movement must be a nonzero bounded relative step.")
+                self._mouse_preflight(dx, dy)
+                self._mouse_preflight(dx, dy)
+                self._mouse_session = True
+                if not self._api.send_mouse_move(dx, dy):
+                    self._healthy = False
+                    self._reason = "Windows rejected an input event. Restart the app before live use."
+                    raise InputSafetyError(self._reason)
+                self._mouse_target_check()
+            except Exception as exc:
+                self._mouse_failure(exc)
+
+    def mouse_wheel(self, steps: int) -> None:
+        with self._lock:
+            try:
+                if not _valid_wheel_steps(steps):
+                    raise InputSafetyError("Mouse wheel movement must be one to three bounded notches.")
+                self._mouse_preflight()
+                self._mouse_preflight()
+                self._mouse_session = True
+                if not self._api.send_mouse_wheel(steps):
+                    self._healthy = False
+                    self._reason = "Windows rejected an input event. Restart the app before live use."
+                    raise InputSafetyError(self._reason)
+                self._mouse_target_check()
+            except Exception as exc:
+                self._mouse_failure(exc)
+
     def _release_locked(self) -> bool:
         success = True
         for key in tuple(self._held):
@@ -761,11 +1018,16 @@ class WindowsBackend:
                 self.key_up(key)
             except InputSafetyError:
                 success = False
+        for button in tuple(self._held_buttons):
+            try:
+                self.mouse_button_up(button)
+            except InputSafetyError:
+                success = False
         return success
 
     def release_all(self) -> bool:
-        # Key-up events must still be attempted after focus loss. Suppressing
-        # these events based on foreground state would leave synthetic keys down.
+        # Release events must still be attempted after focus/pointer loss.
+        # Suppressing these events would leave synthetic keys/buttons down.
         with self._lock:
             return self._release_locked()
 
@@ -804,10 +1066,20 @@ class WindowsBackend:
                     reason = "A modifier key was pressed. Live input was paused."
                 elif any(self._clock() >= deadline for deadline in self._held.values()):
                     reason = "The independent key-release watchdog paused live input."
+                elif any(self._clock() >= deadline for deadline in self._held_buttons.values()):
+                    reason = "The independent mouse-release watchdog paused live input."
+                elif self._mouse_session or self._held_buttons:
+                    if self._physical_mouse_down(ignore_owned=True):
+                        reason = "physical_mouse_button_held"
+                    else:
+                        try:
+                            self._mouse_target_check()
+                        except InputBlocked as exc:
+                            reason = str(exc)
                 if reason:
                     self._live = False
                     self._release_locked()
-            elif self._held:
+            elif self._held or self._held_buttons:
                 self._release_locked()
             return bool(panic), reason
 

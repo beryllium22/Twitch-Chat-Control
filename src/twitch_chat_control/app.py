@@ -57,6 +57,9 @@ class ScrollPage(ttk.Frame):
 
     def __init__(self, parent: ttk.Notebook) -> None:
         super().__init__(parent)
+        self._focus_job: str | None = None
+        self._content_size: tuple[int, int] | None = None
+        self._canvas_size: tuple[int, int] | None = None
         self.canvas = tk.Canvas(self, bg=BG, highlightthickness=0, borderwidth=0)
         scroll = ttk.Scrollbar(self, orient="vertical", command=self.canvas.yview)
         self.canvas.configure(yscrollcommand=scroll.set)
@@ -66,6 +69,7 @@ class ScrollPage(ttk.Frame):
         self._window = self.canvas.create_window((0, 0), window=self.content, anchor="nw")
         self.content.bind("<Configure>", self._resize_content)
         self.canvas.bind("<Configure>", self._resize_canvas)
+        self.bind("<Destroy>", self._cancel_focus_reveal, add="+")
 
     def install_navigation(self) -> None:
         self._wheel_router = install_page_wheel_routing(self, self.canvas, self.content)
@@ -89,11 +93,37 @@ class ScrollPage(ttk.Frame):
         elif bottom > visible_top + visible_height - 8:
             self.canvas.yview_moveto(max(0, bottom + 12 - visible_height) / total)
 
-    def _resize_content(self, _event: Any) -> None:
+    def _queue_focus_reveal(self) -> None:
+        if self._focus_job is None:
+            self._focus_job = self.after_idle(self._reveal_current_focus)
+
+    def _reveal_current_focus(self) -> None:
+        self._focus_job = None
+        widget = self.focus_get()
+        if widget is not None and str(widget).startswith(str(self.content) + "."):
+            self.reveal_widget(widget)
+
+    def _cancel_focus_reveal(self, event: Any) -> None:
+        if event.widget is self and self._focus_job is not None:
+            self.after_cancel(self._focus_job)
+            self._focus_job = None
+
+    def _resize_content(self, event: Any) -> None:
         self.canvas.configure(scrollregion=self.canvas.bbox("all"))
+        size = (event.width, event.height)
+        if size != self._content_size:
+            self._content_size = size
+            self._queue_focus_reveal()
 
     def _resize_canvas(self, event: Any) -> None:
         self.canvas.itemconfigure(self._window, width=event.width)
+        size = (event.width, event.height)
+        if size != self._canvas_size:
+            self._canvas_size = size
+            # Readiness text and validation can resize the viewport after a
+            # FocusIn. Keep that field visible once the new geometry settles.
+            # Position-only events from manual scrolling do not snap it back.
+            self._queue_focus_reveal()
 
 class App:
     def __init__(
@@ -209,15 +239,17 @@ class App:
     def _build(self) -> None:
         outer = ttk.Frame(self.root, padding=(22, 16))
         outer.pack(fill="both", expand=True)
+        outer.columnconfigure(0, weight=1)
+        outer.rowconfigure(2, weight=1)
         heading = ttk.Frame(outer)
-        heading.pack(fill="x")
+        heading.grid(row=0, column=0, sticky="ew")
         title = ttk.Frame(heading)
         title.pack(side="left", fill="x", expand=True)
         ttk.Label(title, text="Twitch Chat Control", style="Title.TLabel").pack(anchor="w")
         ttk.Button(heading, text="STOP ALL  ·  F8", style="Danger.TButton", command=self._panic).pack(side="right")
 
         status_row = ttk.Frame(outer, padding=(0, 9, 0, 9))
-        status_row.pack(fill="x")
+        status_row.grid(row=1, column=0, sticky="ew")
         self.state_var = tk.StringVar(value="DISARMED · PREVIEW")
         self.status_var = tk.StringVar(value="Paused · Preview")
         self.connection_var = tk.StringVar(value="Twitch not connected")
@@ -226,7 +258,9 @@ class App:
         ttk.Label(status_row, textvariable=self.connection_var, style="Muted.TLabel").pack(side="right")
 
         self.notebook = ttk.Notebook(outer)
-        self.notebook.pack(fill="both", expand=True)
+        # Reserve the stop/start guidance even when enlarged text makes a page
+        # taller than the available screen. Only the page viewport shrinks.
+        self.notebook.grid(row=2, column=0, sticky="nsew")
         self._pages = [ScrollPage(self.notebook) for _ in range(3)]
         self.session_tab, self.commands_tab, self.safety_tab = (page.content for page in self._pages)
         self.activity_tab = ttk.Frame(self.notebook, padding=16)
@@ -241,7 +275,7 @@ class App:
         self.notebook.bind("<<NotebookTabChanged>>", lambda _event: self.command_editor.cancel_capture())
 
         footer = ttk.Frame(outer, style="Surface.TFrame", padding=(14, 10))
-        footer.pack(fill="x", pady=(12, 0))
+        footer.grid(row=3, column=0, sticky="ew", pady=(12, 0))
         footer.columnconfigure(0, weight=1)
         self.readiness_var = tk.StringVar()
         self.readiness_detail_var = tk.StringVar()
@@ -258,7 +292,7 @@ class App:
         self.pause_button = ttk.Button(actions, text="Pause", command=self._pause)
         self.pause_button.pack(side="left")
         self.notice_label = ttk.Label(outer, textvariable=self.notice_var, style="Small.TLabel", wraplength=1080)
-        self.notice_label.pack(anchor="w", pady=(8, 0), fill="x")
+        self.notice_label.grid(row=4, column=0, sticky="ew", pady=(8, 0))
         def fit_readiness(event: Any) -> None:
             width = max(280, event.width - actions.winfo_reqwidth() - 48)
             configure_if_changed(self.readiness_label, wraplength=width)
@@ -293,10 +327,10 @@ class App:
         frame.columnconfigure((0, 1), weight=1, uniform="session")
         ttk.Label(frame, text="Make chat part of your game", style="Heading.TLabel").grid(row=0, column=0, columnspan=2, sticky="w")
         ttk.Label(frame, text="Try your controls in Preview first. Connect your channel when you are ready.", style="Muted.TLabel").grid(row=1, column=0, columnspan=2, sticky="w", pady=(4, 16))
-        mode_card = self._card(frame, "1  Choose your mode", "Preview is a safe place to test: it never presses game keys.")
+        mode_card = self._card(frame, "1  Choose your mode", "Preview simulates your controls without sending keyboard or mouse input.")
         mode_card.grid(row=2, column=0, sticky="nsew", padx=(0, 7))
         self.mode_var = tk.StringVar(value="preview")
-        ttk.Radiobutton(mode_card, text="Preview · no keyboard input", style="Card.TRadiobutton", variable=self.mode_var, value="preview", command=self._mode_changed).pack(anchor="w")
+        ttk.Radiobutton(mode_card, text="Preview · no game input", style="Card.TRadiobutton", variable=self.mode_var, value="preview", command=self._mode_changed).pack(anchor="w")
         self.live_radio = ttk.Radiobutton(mode_card, text="Live game control · Windows", style="Card.TRadiobutton", variable=self.mode_var, value="live", command=self._mode_changed)
         self.live_radio.pack(anchor="w")
         if not self.backend.available:
@@ -330,7 +364,7 @@ class App:
         self.sim_role.trace_add("write", lambda *_args: set_var_if_changed(self.sim_role_label, ROLE_LABELS.get(self.sim_role.get(), "Viewer")))
         self.sim_button = ttk.Button(form, text="Try command", command=self._simulate)
         self.sim_button.grid(row=1, column=2, pady=(4, 0))
-        self.sim_result_var = tk.StringVar(value="Start Preview to try a command. Nothing will be sent to your keyboard.")
+        self.sim_result_var = tk.StringVar(value="Start Preview to try a command. No keyboard or mouse input will be sent.")
         self._wrapped_label(self.preview_card, textvariable=self.sim_result_var, style="CardMuted.TLabel", wraplength=900).pack(anchor="w", pady=(10, 0))
         self.sim_entry.bind("<Return>", lambda _event: self._simulate())
         self.connection_setup_var = tk.BooleanVar(value=False)
@@ -365,6 +399,7 @@ class App:
         self.ack_check = ttk.Checkbutton(self.game_card, variable=self.ack_var, style="Card.TCheckbutton", text="I understand when to pause", command=self._ack_changed)
         self.ack_check.pack(anchor="w", pady=(12, 0))
         self._wrapped_label(self.game_card, text="Pause before opening game chat, consoles, overlays, purchases, or sensitive menus. Losing game focus also stops control.", style="CardMuted.TLabel", wraplength=410).pack(anchor="w", pady=(4, 0))
+        self.mouse_hint = self._wrapped_label(self.game_card, text="Mouse bindings need the pointer over the game's play area. Keep it away from window borders; start with small movements.", style="CardMuted.TLabel", wraplength=410)
 
     def _build_commands(self) -> None:
         frame = self.commands_tab
@@ -676,7 +711,7 @@ class App:
         if snapshot.state == "pending":
             status, style = f"Switch to your game · {snapshot.pending_seconds:.1f}s", "Live.TLabel"
         elif snapshot.state == "armed":
-            status = "Preview running · No keys sent" if preview else "Live control active · F8 stops input"
+            status = "Preview running · No game input" if preview else "Live control active · F8 stops input"
             style = "Status.TLabel" if preview else "Live.TLabel"
         elif snapshot.backend_fault and requested_mode == "live":
             status, style = "Stopped · Restart before live input", "Stopped.TLabel"
@@ -716,18 +751,24 @@ class App:
             elif can_simulate:
                 simulator_hint = "Preview is running. Try a command and compare different viewer roles."
             else:
-                simulator_hint = "Start Preview to try a command. Nothing will be sent to your keyboard."
+                simulator_hint = "Start Preview to try a command. No keyboard or mouse input will be sent."
             set_var_if_changed(self.sim_result_var, simulator_hint)
         triggers = tuple(command.trigger for command in self._profile.commands if command.enabled)
         configure_if_changed(self.sim_entry, values=triggers)
         audience = AUDIENCE_LABELS.get(self._profile.audience, "Review audience")
-        set_var_if_changed(self.profile_summary_var, f"{self._profile.name}\n{enabled} enabled commands · {audience}")
+        mouse_count = sum(command.enabled and command.is_mouse for command in self._profile.commands)
+        mouse_summary = f" · {mouse_count} mouse" if mouse_count else ""
+        set_var_if_changed(self.profile_summary_var, f"{self._profile.name}\n{enabled} enabled commands{mouse_summary} · {audience}")
+        if mouse_count:
+            self.mouse_hint.pack(anchor="w", pady=(8, 0))
+        else:
+            self.mouse_hint.pack_forget()
         allowed = f"{len(self._profile.allowed_user_ids)} allowed IDs" if self._profile.allowed_user_ids else "Allowed-user list off"
         set_var_if_changed(self.access_summary_var, f"Applied: {allowed} · {len(self._profile.blocked_user_ids)} blocked IDs. Queue: {self._profile.queue_size}; expiry: {self._profile.queue_ttl_ms} ms.")
         if not available:
             safety = "Preview works here. Live game control requires the Windows app and its native safety checks."
         elif safety_ready:
-            safety = "F8 is ready. Focus, process, modifier-key, and held-key safeguards are active for live control."
+            safety = "F8 is ready. Focus, process, held-input, and mouse-target safeguards are active for live control."
         else:
             safety = "F8 or native safety checks are not ready. Free F8 in other apps and restart without administrator rights."
         set_var_if_changed(self.safety_var, safety)
@@ -910,7 +951,7 @@ class App:
         elif not preview:
             self.notice_var.set("Focus your selected game now. Live input starts only if it is in focus after 3 seconds.")
         else:
-            self.notice_var.set("Preview started. Try a command on Session; no game keys are sent.")
+            self.notice_var.set("Preview started. Try a command on Session; no keyboard or mouse input is sent.")
         self._refresh_session_ui()
 
     def _panic(self) -> None:
@@ -932,7 +973,7 @@ class App:
         )
         decision = self.engine.submit(message)
         if decision.accepted:
-            result = f"Accepted as {ROLE_LABELS.get(role, 'Viewer')}. The mapped action is queued in Preview; no keys will be sent."
+            result = f"Accepted as {ROLE_LABELS.get(role, 'Viewer')}. The mapped action is queued in Preview; no keyboard or mouse input will be sent."
         else:
             result = reason_text(decision.reason)
         self.sim_result_var.set(result)
@@ -1080,11 +1121,9 @@ class App:
         decision = preview.submit(message)
         if decision.accepted:
             preview.tick()
-            label = {"space": "Space", "left": "Arrow Left", "right": "Arrow Right",
-                     "up": "Arrow Up", "down": "Arrow Down"}.get(command.key, command.key.upper())
-            result = f"Preview only: {command.trigger} -> {label} for {command.hold_ms} ms. Allowed as {role}; no key sent."
+            result = f"Preview only: {command.trigger} -> {command.action_summary}. Allowed as {role}; no keyboard or mouse input sent."
         else:
-            result = f"Preview as {role}: {decision.reason.replace('_', ' ')}. No key sent. Change the preview role on Session if needed."
+            result = f"Preview as {role}: {decision.reason.replace('_', ' ')}. No keyboard or mouse input sent. Change the preview role on Session if needed."
         preview.disarm("preview_complete")
         self.notice_var.set(result)
         self._log(result)

@@ -52,3 +52,15 @@ class PreviewBackend:
 
     def key_up(self, key: str) -> None:
         raise RuntimeError("Profile previews cannot send input.")
+
+    def mouse_button_down(self, button: str) -> None:
+        raise RuntimeError("Profile previews cannot send input.")
+
+    def mouse_button_up(self, button: str) -> None:
+        raise RuntimeError("Profile previews cannot send input.")
+
+    def mouse_move(self, dx: int, dy: int) -> None:
+        raise RuntimeError("Profile previews cannot send input.")
+
+    def mouse_wheel(self, steps: int) -> None:
+        raise RuntimeError("Profile previews cannot send input.")
