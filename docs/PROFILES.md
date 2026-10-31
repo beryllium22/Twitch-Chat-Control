@@ -6,13 +6,15 @@ Profiles contain only gameplay commands and participation/rate settings. They ne
 
 Open **Controls & commands**, or choose **Edit commands** from **Session**. The **Your commands** list stays beside the selected mapping. **Search** filters by command or action; **Clear** restores the list without losing a pending draft. Empty lists and searches show what to do next. All profile settings can be configured in the GUI; editing JSON is optional.
 
-1. Choose a starting point under **Start from**, then click **New profile**. **Blank** starts with no commands, **WASD movement** supplies W/A/S/D movement and Space to jump, and **Arrow-key movement** supplies arrows and Space to jump. All three start with the conservative moderator-and-broadcaster audience and default safety limits. Enter a **Profile name**.
+1. Choose a starting point under **Start from**, then click **New profile**. **Blank** starts with no commands, **WASD movement** supplies W/A/S/D movement and Space to jump, and **Arrow-key movement** supplies arrows and Space to jump. **Keyboard & mouse** adds four look directions, two mouse buttons, and wheel up/down to the five WASD commands, for 13 mappings. All four start with the conservative moderator-and-broadcaster audience and default safety limits. Enter a **Profile name**.
 2. Click **New command** to add a command, or select an existing row to edit it. Set **Chat command** to an exact trigger such as `!jump`. Choose **Game action**: **Keyboard key**, **Mouse button**, **Mouse movement**, or **Mouse wheel**. The editor shows only the fields relevant to that action.
 3. Choose the key or button and **Hold time**, or set movement or wheel values as described below. Set **Cooldown** to 0–60,000 ms. The cooldown is specific to that command; the global, per-viewer, and per-minute limits still apply across all action types. Use **Enable this command** to include or disable the mapping. Review the short summary and any inline validation message.
 4. Click **Apply command** to update the current profile in memory. **Revert** discards the current command draft and restores the applied mapping; it does not reload the profile from disk. Invalid fields or a duplicate trigger leave the applied profile unchanged. The message explains the correction, and applying an invalid draft focuses the problem field. The editor distinguishes **Unapplied changes** from **Applied to this profile**; applied does not mean saved to disk.
 5. Review **Safety & access** and click **Apply safety settings**. Use **Save profile** to keep the profile for another session. Saving also validates and applies any pending command and safety edits; invalid settings prevent the save.
 
 **Duplicate** copies the selected mapping into a new draft with an unused command name. Edit it and click **Apply command**. The **Enable this command** checkbox changes the draft; click **Apply command** to apply that change. **Remove** deletes a mapping after confirmation. These operations remain unsaved until **Save profile**. A profile may contain 0–64 commands, so an empty profile is valid.
+
+For a quick starting point, choose **Start with an action**, then **Add command**. Starters include jump, forward movement, four look directions, left/right mouse buttons, and wheel up/down. Adding one fills an unapplied draft, chooses an unused trigger, and brings the fields into view. You can change every field before **Apply command**. It never sends input or starts a session; replacing a pending draft uses the usual apply/discard/cancel prompt.
 
 Changing the selected mapping while a draft is pending offers **Yes** to apply, **No** to discard that draft, or **Cancel** to keep editing. It does not silently throw away the draft. Editing a command or safety field immediately disarms controls; applying changes does not rearm them.
 
@@ -40,11 +42,19 @@ Capture is a local GUI interaction, not a global keyboard recorder. It stops whe
 
 ### Preview a mapping
 
-Select a mapping and click **Preview**. Valid pending edits are applied first. The app switches the main session to **Preview · no game input** and pauses it while checking the selected mapping separately. This check cannot press keys, move the pointer, click buttons, or scroll, and connected Twitch messages cannot join it. A result beside the editor reports the permitted action or rejection reason; no operating-system input is sent.
+Select a mapping and click **Preview**. Valid pending edits are applied first. The app switches the main session to **Preview · no game input** and pauses it while checking the selected mapping separately. This check cannot press keys, move the pointer, click buttons, or scroll, and connected Twitch messages cannot join it. A result beside the editor reports the permitted action or rejection reason; the **Practice pad** on **Session** illustrates an action that ran. No operating-system input is sent.
 
 The simulated participant's role comes from **Try as** in the **Try a chat command** card on **Session**. For the default audience, **Moderator** should be accepted and **Viewer** rejected. Preview uses a synthetic user, so a Twitch user-ID allow/block list can also affect the result.
 
 Each editor preview starts with fresh command history. It checks the mapping and participation rules but does not reproduce cooldowns, queue occupancy, or the rolling action budget accumulated during a real session. To test repeated commands and cooldown behavior, use **Session**, select **Preview · no game input**, click **Start preview**, and use **Try command** repeatedly. The session simulator remembers recent commands, displays an acceptance or rejection explanation beside the form, and still sends no input. Its command dropdown lists enabled mappings. You can also stay in Preview and choose **Connect Twitch to test real chat...** to receive your channel's messages without game input. Neither preview confirms actual game bindings, pointer placement, movement distance, or compatibility.
+
+The **Practice pad** shows the selected key, mouse button, wheel direction, or movement of a virtual pointer. Movement stays within the illustration; reaching its edge does not predict what the real game will do. **Reset pad** recenters the illustration and clears its recent trail without resetting session cooldowns, counts, or rate limits. A queued command is illustrated only after Preview actually runs it. Old events from a previous profile or session and live game input cannot animate the pad.
+
+### Share the enabled commands
+
+Choose **Copy chat commands** on **Session** to copy a readable reference for a channel panel or stream notes. It includes enabled triggers and their actions, the allowed audience, command cooldowns, and shared pace limits. It notes when additional local allow/block restrictions apply without including Twitch user IDs. The reference also omits the freeform profile name, sign-in details, selected window, and session state.
+
+Copying validates and applies pending command and safety edits first. Invalid drafts keep their correction messages and leave the clipboard unchanged. With no enabled commands, the app asks you to add or enable a mapping instead of copying an empty reference. Copying does not reset policy history or authorize game input. It does not save the profile, send chat, or post to your channel; paste the result yourself wherever viewers should read it. Large profiles produce a multiline list intended for notes or a panel, not a single Twitch chat message.
 
 ### Save and reopen profiles
 
@@ -56,7 +66,7 @@ Existing schema-1 keyboard profiles load unchanged. Adding a mouse binding autom
 
 ## Navigate and review your session
 
-The bottom bar stays visible on every tab. **Start preview** starts a session without keyboard or mouse input; in Live mode it becomes **Arm game control · 3 s**. **Pause** stops the current session. The readiness message explains missing setup and provides links such as **Connect Twitch**, **Choose game**, or **Review reminder**. No keyboard shortcut starts or arms control, and a setup link never starts it automatically.
+The bottom bar stays visible on every tab. **Start preview** starts a session without keyboard or mouse input; in Live mode it becomes **Arm game control · 3 s**. **Pause** stops the current session. The readiness message explains missing setup and provides links such as **Connect Twitch**, **Choose game**, or **Review reminder**. A safety stop keeps its cause and recovery advice visible, including focus loss, unsafe pointer placement, held modifiers, or a backend fault. Setup checks still govern whether Start is available, and correcting the cause always requires a local start or arm action. No keyboard shortcut starts or arms control, and a setup link never starts it automatically.
 
 | Shortcut | Action |
 | --- | --- |
@@ -75,6 +85,8 @@ In **Safety & access**, **Who can play?** uses readable audience names, includin
 
 **Activity** keeps the latest 200 approved events in memory. Events explain actions and rejection reasons without raw chat or sign-in details. New entries follow the bottom only when you are already reading there. Older entries eventually leave this bounded history; it is not a permanent audit file.
 
+**Session** and **Activity** also show **Preview + live since app opened** totals for accepted and blocked commands, combining the main Preview and live sessions. Accepted means the command entered the queue; it does not confirm game input, and a queued command can expire. Ordinary chat and unconfigured commands are ignored and do not increase these totals. **Queued now** is the current waiting count, while **Held input** reports an active held key or button. Isolated editor previews use a separate engine and do not contribute to these totals. **Clear activity**, **Reset pad**, pausing, and changing profiles do not reset the main engine's totals or policy history.
+
 ## Movement templates
 
 | WASD command / key | Arrow-key command / key | Hold | Per-command cooldown |
@@ -84,6 +96,15 @@ In **Safety & access**, **Who can play?** uses readable audience names, includin
 | `!left` / A | `!left` / Arrow Left | 150 ms | 300 ms |
 | `!right` / D | `!right` / Arrow Right | 150 ms | 300 ms |
 | `!jump` / Space | `!jump` / Space | 100 ms | 1,000 ms |
+
+The **Keyboard & mouse** template includes those five WASD mappings plus:
+
+| Command | Mouse action | Per-command cooldown |
+| --- | --- | --- |
+| `!lookleft` / `!lookright` | Horizontal movement −25 / +25 units | 500 ms |
+| `!lookup` / `!lookdown` | Vertical movement −25 / +25 units | 500 ms |
+| `!primary` / `!secondary` | Left / right button held for 100 ms | 1,000 ms |
+| `!wheelup` / `!wheeldown` | One wheel step up / down | 500 ms |
 
 The built-in starter profile uses the WASD mappings. The default audience is **moderators and the broadcaster**. Select **Everyone in chat** under **Who can play?** only for open chat participation. Windows resolves each configured key through its keyboard mapping and sends a scan-code input. Verify your keyboard layout and game bindings in a controlled live test after reviewing the profile in Preview.
 

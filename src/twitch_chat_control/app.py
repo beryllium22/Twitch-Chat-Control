@@ -17,10 +17,12 @@ from typing import Any, Callable
 
 from . import __version__
 from .control_editor import CommandEditor
-from .engine import SafetyEngine
-from .models import Command, Profile, ProfileError
+from .engine import EngineEvent, SafetyEngine
+from .models import Command, Profile, ProfileError, normalize_command
 from .presets import PROFILE_TEMPLATES, PreviewBackend, new_profile
+from .preview_pad import PreviewPad
 from .profile_io import load_profile, save_profile
+from .session_tools import command_reference, paused_guidance
 from .session_ui import Readiness, reason_text, session_readiness
 from .twitch import ACTIVATE_URL, ChatMessage, TwitchClient
 from .ui_support import (
@@ -280,24 +282,25 @@ class App:
         self.readiness_var = tk.StringVar()
         self.readiness_detail_var = tk.StringVar()
         self.readiness_heading = ttk.Label(footer, textvariable=self.readiness_var, style="CardHeading.TLabel", wraplength=400)
-        self.readiness_heading.grid(row=0, column=0, sticky="w")
+        self.readiness_heading.grid(row=0, column=0, sticky="ew")
         self.readiness_label = ttk.Label(footer, textvariable=self.readiness_detail_var, style="CardMuted.TLabel", wraplength=600, justify="left")
-        self.readiness_label.grid(row=1, column=0, columnspan=2, sticky="w", pady=(4, 0))
+        self.readiness_label.grid(row=1, column=0, columnspan=3, sticky="ew", pady=(4, 0))
         self.next_step_button = ttk.Button(footer, text="Review commands", style="CardLink.TButton", command=self._next_step)
         self.next_step_button.grid(row=0, column=1, padx=(8, 16), sticky="e")
         actions = ttk.Frame(footer, style="Card.TFrame")
-        actions.grid(row=0, column=2, rowspan=2, sticky="e")
+        actions.grid(row=0, column=2, sticky="e")
         self.arm_button = ttk.Button(actions, text="Start preview", style="Accent.TButton", command=self._arm)
         self.arm_button.pack(side="left", padx=(0, 8))
         self.pause_button = ttk.Button(actions, text="Pause", command=self._pause)
         self.pause_button.pack(side="left")
         self.notice_label = ttk.Label(outer, textvariable=self.notice_var, style="Small.TLabel", wraplength=1080)
         self.notice_label.grid(row=4, column=0, sticky="ew", pady=(8, 0))
-        def fit_readiness(event: Any) -> None:
-            width = max(280, event.width - actions.winfo_reqwidth() - 48)
-            configure_if_changed(self.readiness_label, wraplength=width)
-            configure_if_changed(self.readiness_heading, wraplength=max(180, width - self.next_step_button.winfo_reqwidth() - 24))
-        footer.bind("<Configure>", fit_readiness)
+        # Button labels change when switching modes, even if the footer itself
+        # keeps its size. Follow each label's allocated width instead of stale
+        # estimates from the outer frame. Details use a full-width second row.
+        for label in (self.readiness_heading, self.readiness_label):
+            label.bind("<Configure>", lambda event, target=label:
+                       configure_if_changed(target, wraplength=max(40, event.width - 4)))
         outer.bind("<Configure>", lambda event: configure_if_changed(self.notice_label, wraplength=max(400, event.width - 44)))
 
         for page in self._pages:
@@ -326,7 +329,7 @@ class App:
         frame = self.session_tab
         frame.columnconfigure((0, 1), weight=1, uniform="session")
         ttk.Label(frame, text="Make chat part of your game", style="Heading.TLabel").grid(row=0, column=0, columnspan=2, sticky="w")
-        ttk.Label(frame, text="Try your controls in Preview first. Connect your channel when you are ready.", style="Muted.TLabel").grid(row=1, column=0, columnspan=2, sticky="w", pady=(4, 16))
+        self._wrapped_label(frame, text="Try your controls in Preview first. Connect your channel when you are ready.", style="Muted.TLabel").grid(row=1, column=0, columnspan=2, sticky="ew", pady=(4, 16))
         mode_card = self._card(frame, "1  Choose your mode", "Preview simulates your controls without sending keyboard or mouse input.")
         mode_card.grid(row=2, column=0, sticky="nsew", padx=(0, 7))
         self.mode_var = tk.StringVar(value="preview")
@@ -345,6 +348,9 @@ class App:
         links.pack(anchor="w")
         ttk.Button(links, text="Edit commands", command=lambda: self._go_to_step("commands")).pack(side="left", padx=(0, 8))
         ttk.Button(links, text="Who can play?", command=lambda: self._go_to_step("safety")).pack(side="left")
+        self.copy_commands_button = ttk.Button(profile_card, text="Copy chat commands", command=self._copy_chat_commands)
+        self.copy_commands_button.pack(anchor="w", pady=(8, 0))
+        self._wrapped_label(profile_card, text="Copies enabled commands for your viewers. Pending edits are checked and applied first.", style="CardMuted.TLabel", wraplength=410).pack(anchor="w", pady=(5, 0))
 
         self.preview_card = self._card(frame, "3  Try a chat command", "Start preview using the button below, then send a test command here.")
         self.preview_card.grid(row=3, column=0, columnspan=2, sticky="ew", pady=(14, 0))
@@ -364,12 +370,24 @@ class App:
         self.sim_role.trace_add("write", lambda *_args: set_var_if_changed(self.sim_role_label, ROLE_LABELS.get(self.sim_role.get(), "Viewer")))
         self.sim_button = ttk.Button(form, text="Try command", command=self._simulate)
         self.sim_button.grid(row=1, column=2, pady=(4, 0))
+        self.sim_action_var = tk.StringVar()
+        self._wrapped_label(self.preview_card, textvariable=self.sim_action_var, style="CardMuted.TLabel", wraplength=900).pack(anchor="w", pady=(8, 0))
+        self.sim_var.trace_add("write", lambda *_args: self._update_sim_action())
         self.sim_result_var = tk.StringVar(value="Start Preview to try a command. No keyboard or mouse input will be sent.")
         self._wrapped_label(self.preview_card, textvariable=self.sim_result_var, style="CardMuted.TLabel", wraplength=900).pack(anchor="w", pady=(10, 0))
         self.sim_entry.bind("<Return>", lambda _event: self._simulate())
         self.connection_setup_var = tk.BooleanVar(value=False)
         self.connection_setup_button = ttk.Button(self.preview_card, text="Connect Twitch to test real chat...", style="CardLink.TButton", command=self._toggle_connection_setup)
         self.connection_setup_button.pack(anchor="w", pady=(8, 0))
+        self.preview_pad = PreviewPad(self.preview_card)
+        self.preview_pad.pack(fill="x", pady=(12, 0))
+
+        self.session_totals_var = tk.StringVar()
+        self.queue_status_var = tk.StringVar()
+        self.session_numbers = ttk.Frame(frame)
+        self.session_numbers.grid(row=5, column=0, columnspan=2, sticky="ew", pady=(12, 0))
+        self._wrapped_label(self.session_numbers, textvariable=self.session_totals_var, style="Small.TLabel", wraplength=900).pack(anchor="w")
+        self._wrapped_label(self.session_numbers, textvariable=self.queue_status_var, style="Small.TLabel", wraplength=900).pack(anchor="w", pady=(3, 0))
 
         self.connection_card = self._card(frame, "Connect your Twitch channel", "Use your own Twitch Public application. Your sign-in stays in memory for this session.")
         self.connection_card.grid(row=4, column=0, sticky="nsew", pady=(14, 0), padx=(0, 7))
@@ -548,9 +566,12 @@ class App:
     def _build_activity(self) -> None:
         header = ttk.Frame(self.activity_tab)
         header.pack(fill="x")
-        ttk.Label(header, text="What happened in your session", style="Heading.TLabel").pack(side="left")
-        ttk.Button(header, text="Clear activity", command=self._clear_log).pack(side="right")
-        ttk.Label(self.activity_tab, text="The latest 200 events. Scroll up to read without being pulled back to new entries.\nChat text and sign-in details are never recorded here.", style="Muted.TLabel").pack(anchor="w", pady=(6, 12))
+        heading = ttk.Label(header, text="Session activity", style="Heading.TLabel")
+        clear_button = ttk.Button(header, text="Clear activity", command=self._clear_log)
+        self._adaptive_toolbar(header, heading, clear_button)
+        self._wrapped_label(self.activity_tab, textvariable=self.session_totals_var, style="Muted.TLabel", wraplength=900).pack(anchor="w", pady=(8, 0))
+        self._wrapped_label(self.activity_tab, textvariable=self.queue_status_var, style="Muted.TLabel", wraplength=900).pack(anchor="w", pady=(3, 0))
+        self._wrapped_label(self.activity_tab, text="Latest 200 events. Accepted commands can expire before running. Clearing this view keeps totals and limits. Chat text and sign-in details are never recorded.", style="Small.TLabel", wraplength=900).pack(anchor="w", pady=(6, 12))
         frame = ttk.Frame(self.activity_tab)
         frame.pack(fill="both", expand=True)
         self.log = tk.Text(frame, bg=PANEL, fg=TEXT, insertbackground=TEXT, relief="flat", wrap="word",
@@ -658,6 +679,7 @@ class App:
                          "preview": "Preview", "executed": "Game input", "released": "Released", "dropped": "Skipped",
                          "fault": "Safety stop", "blocked": "Setup needed"}.get(value.kind, "Session")
                 activity.append(f"{label}" + (f" · {value.command}" if value.command else "") + f": {reason_text(value.reason)}")
+                self._render_preview_event(value)
             elif kind == "notice":
                 set_var_if_changed(self.notice_var, value)
                 activity.append(value)
@@ -686,6 +708,10 @@ class App:
 
     def _refresh_session_ui(self) -> Readiness:
         snapshot = self.engine.snapshot()
+        # Counters can change without any setup or mode change. Keep these
+        # cheap writes outside the cached full-page presentation refresh.
+        set_var_if_changed(self.session_totals_var, f"Preview + live since app opened: {snapshot.accepted:,} accepted · {snapshot.rejected:,} blocked")
+        set_var_if_changed(self.queue_status_var, f"Queued now: {snapshot.queue_depth} · Held input: {snapshot.active_action or 'None'}")
         if snapshot.reason == "emergency_stop":
             # Registered native F8 can be consumed before Tk receives KeyPress.
             self.command_editor.cancel_capture()
@@ -733,8 +759,18 @@ class App:
             acknowledged=self.ack_var.get(),
         )
         self._readiness = readiness
-        set_var_if_changed(self.readiness_var, readiness.headline)
-        set_var_if_changed(self.readiness_detail_var, readiness.detail)
+        pause = paused_guidance(snapshot.reason) if snapshot.state == "disarmed" else None
+        # Keep a recoverable stop visible instead of immediately replacing its
+        # cause with a generic Ready message. Readiness remains authoritative
+        # for Start's enabled state; this text never grants input authority.
+        if pause and (requested_mode == "live" or snapshot.reason == "emergency_stop"):
+            heading, detail = pause
+            if not readiness.ready and readiness.detail not in detail:
+                detail += " " + readiness.detail
+        else:
+            heading, detail = readiness.headline, readiness.detail
+        set_var_if_changed(self.readiness_var, heading)
+        set_var_if_changed(self.readiness_detail_var, detail)
         action_labels = {"commands": "Review commands", "safety": "Review settings", "connect": "Connect Twitch",
                          "game": "Choose game", "ack": "Review reminder", "restart": "Restart help"}
         configure_if_changed(self.next_step_button, text=action_labels.get(readiness.action, "Review commands"))
@@ -755,6 +791,11 @@ class App:
             set_var_if_changed(self.sim_result_var, simulator_hint)
         triggers = tuple(command.trigger for command in self._profile.commands if command.enabled)
         configure_if_changed(self.sim_entry, values=triggers)
+        if getattr(self, "_sim_commands", None) != self._profile.commands:
+            self._sim_commands = self._profile.commands
+            if normalize_command(self.sim_var.get()) not in triggers:
+                self.sim_var.set(triggers[0] if triggers else "")
+        self._update_sim_action()
         audience = AUDIENCE_LABELS.get(self._profile.audience, "Review audience")
         mouse_count = sum(command.enabled and command.is_mouse for command in self._profile.commands)
         mouse_summary = f" · {mouse_count} mouse" if mouse_count else ""
@@ -791,6 +832,52 @@ class App:
         self._update_profile_status()
         self._ui_signature = signature
         return readiness
+
+    def _update_sim_action(self) -> None:
+        trigger = normalize_command(self.sim_var.get())
+        command = next((item for item in self._profile.commands if item.trigger == trigger and item.enabled), None)
+        detail = f"Mapped action: {command.action_summary}." if command else "Choose an enabled command, or type one exact trigger to test it."
+        set_var_if_changed(self.sim_action_var, detail)
+
+    def _render_preview_event(self, event: EngineEvent) -> None:
+        snapshot = self.engine.snapshot()
+        if (snapshot.state != "armed" or not snapshot.preview or self.mode_var.get() != "preview"
+                or event.generation != snapshot.generation):
+            return
+        if (event.kind == "preview" and type(event.action) is Command and event.action.enabled
+                and event.command == event.action.trigger):
+            self.preview_pad.show_command(event.action)
+            result = f"Preview ran: {event.action.action_summary}. No keyboard or mouse input was sent."
+        elif event.kind in {"rejected", "dropped"}:
+            result = reason_text(event.reason)
+            self.preview_pad.show_rejection(result)
+        else:
+            return
+        set_var_if_changed(self.sim_result_var, result)
+        set_var_if_changed(self.notice_var, result)
+
+    def _copy_chat_commands(self) -> bool:
+        # This explicit local action validates pending edits, then copies only
+        # the approved profile reference. No credentials or runtime data enter
+        # that helper. Copying does not reset policy history or grant input authority.
+        self.command_editor.cancel_capture()
+        if not self._apply_pending_profile():
+            return False
+        count = sum(command.enabled for command in self._profile.commands)
+        if not count:
+            self.notice_var.set("Add or enable a command before copying your chat controls.")
+            self._go_to_step("commands")
+            return False
+        try:
+            reference = command_reference(self._profile)
+            self.root.clipboard_clear()
+            self.root.clipboard_append(reference)
+            self.root.update_idletasks()
+        except (tk.TclError, TypeError, ValueError):
+            self.notice_var.set("The command list could not be copied. Your profile is still available; try Copy chat commands again.")
+            return False
+        self.notice_var.set(f"Copied {count} enabled chat {'command' if count == 1 else 'commands'}. Paste the list where your viewers can see it.")
+        return True
 
     def _log(self, text: str) -> None:
         # Existing callers supply only approved status strings and validated mappings.
@@ -923,6 +1010,7 @@ class App:
         self.engine.disarm("mode_changed")
         self.ack_var.set(False)
         self.command_editor.cancel_capture()
+        self.preview_pad.reset()
         self.notice_var.set("Mode changed. Controls are paused; start when you are ready.")
         self._refresh_session_ui()
 
@@ -951,6 +1039,7 @@ class App:
         elif not preview:
             self.notice_var.set("Focus your selected game now. Live input starts only if it is in focus after 3 seconds.")
         else:
+            self.preview_pad.reset()
             self.notice_var.set("Preview started. Try a command on Session; no keyboard or mouse input is sent.")
         self._refresh_session_ui()
 
@@ -976,6 +1065,7 @@ class App:
             result = f"Accepted as {ROLE_LABELS.get(role, 'Viewer')}. The mapped action is queued in Preview; no keyboard or mouse input will be sent."
         else:
             result = reason_text(decision.reason)
+            self.preview_pad.show_rejection(result)
         self.sim_result_var.set(result)
         self.notice_var.set(result)
 
@@ -1008,6 +1098,8 @@ class App:
             self.profile_status_var.set(value)
 
     def _show_profile(self, profile: Profile, *, refresh_editor: bool = True) -> None:
+        if profile != self._profile:
+            self.preview_pad.reset()
         self._loading = True
         try:
             data = profile.to_dict()
@@ -1111,7 +1203,8 @@ class App:
         if command not in self._profile.commands:
             return "Apply this command before previewing it."
         role = self.sim_role.get()
-        preview = SafetyEngine(PreviewBackend(), profile=self._profile, clock=time.monotonic)
+        events: list[EngineEvent] = []
+        preview = SafetyEngine(PreviewBackend(), on_event=events.append, profile=self._profile, clock=time.monotonic)
         preview.arm(preview=True)
         message = ChatMessage(
             message_id=f"preview-{uuid.uuid4()}", user_id="100000001", login="preview_viewer",
@@ -1121,9 +1214,16 @@ class App:
         decision = preview.submit(message)
         if decision.accepted:
             preview.tick()
-            result = f"Preview only: {command.trigger} -> {command.action_summary}. Allowed as {role}; no keyboard or mouse input sent."
+            ran = any(event.kind == "preview" and event.action == command for event in events)
+            if ran:
+                self.preview_pad.show_command(command)
+                result = f"Preview only: {command.trigger} -> {command.action_summary}. Allowed as {role}; no keyboard or mouse input sent. See the practice pad on Session."
+            else:
+                result = "Preview expired before it could run. Try again; no keyboard or mouse input was sent."
+                self.preview_pad.show_rejection(reason_text("queue_expired"))
         else:
             result = f"Preview as {role}: {decision.reason.replace('_', ' ')}. No keyboard or mouse input sent. Change the preview role on Session if needed."
+            self.preview_pad.show_rejection(reason_text(decision.reason))
         preview.disarm("preview_complete")
         self.notice_var.set(result)
         self._log(result)
@@ -1152,7 +1252,7 @@ class App:
         try:
             profile = new_profile(self.template_var.get())
         except ValueError:
-            self.notice_var.set("Choose Blank, WASD movement, or Arrow-key movement for the new profile.")
+            self.notice_var.set("Choose a starting profile from the list, then select New profile.")
             return
         if not self._confirm_profile_replacement("creating a new profile"):
             return

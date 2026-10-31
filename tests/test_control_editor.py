@@ -8,6 +8,7 @@ tk = pytest.importorskip("tkinter")
 
 from twitch_chat_control import control_editor as module  # noqa: E402
 from twitch_chat_control.models import Command, Profile  # noqa: E402
+from twitch_chat_control.presets import ACTION_STARTERS  # noqa: E402
 
 
 @pytest.fixture
@@ -728,3 +729,128 @@ def test_mouse_movement_keyboard_apply_and_default_preview_copy(editor):
     widget._on_preview = lambda _command: None
     widget.preview_command()
     assert "No keyboard or mouse input" in widget.preview_var.get()
+
+
+@pytest.mark.parametrize("label", tuple(ACTION_STARTERS))
+def test_action_starter_creates_only_a_paused_reviewable_draft(editor, label):
+    widget, state = editor.widget, editor.state
+    original = widget.commands
+    selected = widget.selected_trigger
+    candidate = ACTION_STARTERS[label]
+    widget.starter_var.set(label)
+    assert not widget.dirty and state.edits == 0
+    widget.add_starter_button.invoke()
+    assert state.edits > 0
+    assert not state.changes and not state.previews and state.panics == 0
+    assert widget.dirty and widget.selected_trigger is None
+    assert widget.commands == original
+    assert widget.action_var.get() == module.ACTION_LABELS[candidate.action_type]
+    unique = module.replace(candidate, trigger=widget.trigger_var.get())
+    assert unique.trigger not in {command.trigger for command in original}
+    assert widget._validate_draft() == unique
+    widget.discard_pending()
+    assert widget.commands == original and widget.selected_trigger == selected
+    assert not widget.dirty
+
+
+def test_starter_add_applies_unique_name_without_changing_the_original_bindings(editor):
+    widget, state = editor.widget, editor.state
+    original = (Command("!jump", "r"), Command("!jump_2", "a"))
+    widget.set_commands(original)
+    widget.create_from_starter("Jump · Space")
+    assert widget.trigger_var.get() == "!jump_3"
+    assert widget.apply_pending()
+    assert widget.commands == original + (module.replace(ACTION_STARTERS["Jump · Space"], trigger="!jump_3"),)
+    assert len(state.changes) == 1
+    assert not state.previews
+
+
+@pytest.mark.parametrize("answer", [None, False, True])
+def test_starter_add_respects_pending_edit_apply_discard_cancel(editor, monkeypatch, answer):
+    widget, state = editor.widget, editor.state
+    original = widget.commands
+    widget.hold_var.set("225")
+    monkeypatch.setattr(module.messagebox, "askyesnocancel", lambda *args, **kwargs: answer)
+    widget.create_from_starter("Look left")
+    if answer is None:
+        assert widget.selected_trigger == original[0].trigger
+        assert widget.hold_var.get() == "225" and widget.dirty
+        assert widget.commands == original and not state.changes
+    else:
+        assert widget.selected_trigger is None and widget.dirty
+        assert widget.trigger_var.get() == "!lookleft"
+        assert widget._validate_draft() == ACTION_STARTERS["Look left"]
+        assert len(widget.commands) == len(original)
+        assert widget.commands[0].hold_ms == (225 if answer else original[0].hold_ms)
+        assert len(state.changes) == (1 if answer else 0)
+
+
+def test_starter_add_does_not_replace_invalid_pending_edit(editor, monkeypatch):
+    widget = editor.widget
+    original = widget.commands
+    widget.trigger_var.set("!bad value")
+    monkeypatch.setattr(module.messagebox, "askyesnocancel", lambda *args, **kwargs: True)
+    widget.create_from_starter("Look left")
+    assert widget.trigger_var.get() == "!bad value"
+    assert widget.selected_trigger == original[0].trigger
+    assert widget.commands == original and widget.dirty
+    assert not editor.state.changes
+
+
+@pytest.mark.parametrize("operation", ["new", "starter", "duplicate"])
+def test_full_profile_does_not_discard_pending_edit_when_creation_is_impossible(editor, monkeypatch, operation):
+    widget = editor.widget
+    original = tuple(Command(f"!command{index}", "w") for index in range(64))
+    widget.set_commands(original)
+    widget.hold_var.set("225")
+    monkeypatch.setattr(module.messagebox, "askyesnocancel",
+                        lambda *args, **kwargs: pytest.fail("Cannot create; do not ask to discard this draft"))
+    assert widget.add_starter_button.instate(("disabled",))
+    if operation == "starter":
+        widget.create_from_starter("Wheel up")
+    elif operation == "new":
+        widget.new_command()
+    else:
+        widget.duplicate_command()
+    assert widget.hold_var.get() == "225" and widget.dirty
+    assert widget.commands == original and not editor.state.changes
+
+
+def test_applying_pending_last_slot_does_not_overflow_when_adding_a_starter(editor, monkeypatch):
+    widget = editor.widget
+    widget.set_commands(tuple(Command(f"!command{index}", "w") for index in range(63)))
+    widget.new_command()
+    widget.trigger_var.set("!last")
+    monkeypatch.setattr(module.messagebox, "askyesnocancel", lambda *args, **kwargs: True)
+    widget.create_from_starter("Look up")
+    assert len(widget.commands) == 64
+    assert widget.selected_trigger == "!last" and not widget.dirty
+    assert widget.trigger_var.get() == "!last"
+    assert "64" in widget.error_var.get()
+    assert not any(command.trigger == "!lookup" for command in widget.commands)
+
+
+def test_failed_pause_cannot_create_starter_or_discard_current_mapping(editor):
+    widget = editor.widget
+    original = widget.commands
+    selected = widget.selected_trigger
+
+    def fail():
+        raise RuntimeError("PRIVATE_INPUT_ERROR")
+
+    widget._on_edit = fail
+    widget.create_from_starter("Left mouse button")
+    assert widget.commands == original and widget.selected_trigger == selected
+    assert not widget.dirty and not editor.state.changes
+    assert "PRIVATE_INPUT_ERROR" not in widget.error_var.get()
+    assert widget.apply_button.instate(("disabled",))
+
+
+def test_invalid_starter_choice_keeps_the_existing_draft_without_echoing_text(editor):
+    widget = editor.widget
+    original = widget.commands
+    widget.hold_var.set("225")
+    widget.create_from_starter("PRIVATE_STARTER_VALUE")
+    assert widget.commands == original and widget.hold_var.get() == "225"
+    assert widget.dirty and not editor.state.changes
+    assert "PRIVATE_STARTER_VALUE" not in str(editor.state.notices)

@@ -9,6 +9,7 @@ from tkinter import messagebox, ttk
 from typing import Any, Callable
 
 from .models import MAX_COMMANDS, SAFE_KEYS, Command, Profile, normalize_command
+from .presets import ACTION_STARTERS, starter_command
 
 KEY_LABELS = {key: key.upper() for key in SAFE_KEYS if len(key) == 1}
 KEY_LABELS.update({"space": "Space", "up": "Arrow Up", "down": "Arrow Down",
@@ -109,6 +110,7 @@ class CommandEditor(ttk.Frame):
         self.cooldown_var = tk.StringVar(value="500")
         self.enabled_var = tk.BooleanVar(value=True)
         self.filter_var = tk.StringVar()
+        self.starter_var = tk.StringVar(value=next(iter(ACTION_STARTERS)))
         self.count_var = tk.StringVar()
         self.empty_var = tk.StringVar()
         self.draft_var = tk.StringVar()
@@ -150,7 +152,7 @@ class CommandEditor(ttk.Frame):
         left = ttk.Frame(self, style="Surface.TFrame", padding=16)
         left.grid(row=0, column=0, sticky="nsew", padx=(0, 10))
         left.columnconfigure(0, weight=1)
-        left.rowconfigure(2, weight=1)
+        left.rowconfigure(3, weight=1)
         heading = ttk.Frame(left, style="Card.TFrame")
         heading.grid(row=0, column=0, sticky="ew", pady=(0, 12))
         title = ttk.Frame(heading, style="Card.TFrame")
@@ -160,8 +162,19 @@ class CommandEditor(ttk.Frame):
         self.new_button = ttk.Button(heading, text="New command", command=self.new_command)
         self.new_button.pack(side="right", padx=(8, 0))
 
+        starters = ttk.Frame(left, style="Card.TFrame")
+        starters.grid(row=1, column=0, sticky="ew", pady=(0, 12))
+        starters.columnconfigure(0, weight=1)
+        ttk.Label(starters, text="Start with an action", style="Card.TLabel").grid(
+            row=0, column=0, columnspan=2, sticky="w", pady=(0, 4))
+        self.starter_combo = ttk.Combobox(starters, textvariable=self.starter_var,
+                                          values=tuple(ACTION_STARTERS), state="readonly", width=20)
+        self.starter_combo.grid(row=1, column=0, sticky="ew", padx=(0, 8))
+        self.add_starter_button = ttk.Button(starters, text="Add command", command=self.create_from_starter)
+        self.add_starter_button.grid(row=1, column=1, sticky="e")
+
         search = ttk.Frame(left, style="Card.TFrame")
-        search.grid(row=1, column=0, sticky="ew", pady=(0, 10))
+        search.grid(row=2, column=0, sticky="ew", pady=(0, 10))
         ttk.Label(search, text="Search", style="Card.TLabel").pack(side="left", padx=(0, 8))
         self.search_entry = ttk.Entry(search, textvariable=self.filter_var, width=12)
         self.search_entry.pack(side="left", fill="x", expand=True)
@@ -170,7 +183,7 @@ class CommandEditor(ttk.Frame):
         self.search_entry.bind("<Escape>", lambda _event: self.clear_search())
 
         table = ttk.Frame(left, style="Card.TFrame")
-        table.grid(row=2, column=0, sticky="nsew")
+        table.grid(row=3, column=0, sticky="nsew")
         self.tree = ttk.Treeview(table, columns=("trigger", "key", "enabled"),
                                  show="headings", selectmode="browse", height=6)
         for name, label, width in (("trigger", "Chat command", 120), ("key", "Game action", 115),
@@ -187,13 +200,13 @@ class CommandEditor(ttk.Frame):
                                      justify="center", anchor="center", wraplength=250)
 
         actions = ttk.Frame(left, style="Card.TFrame")
-        actions.grid(row=3, column=0, sticky="ew", pady=(10, 0))
+        actions.grid(row=4, column=0, sticky="ew", pady=(10, 0))
         self.duplicate_button = ttk.Button(actions, text="Duplicate", command=self.duplicate_command)
         self.duplicate_button.pack(side="left", padx=(0, 7))
         self.remove_button = ttk.Button(actions, text="Remove", command=self.remove_command)
         self.remove_button.pack(side="left")
-        ttk.Label(left, text="Editing pauses live control. Save your profile to keep changes.",
-                  style="CardMuted.TLabel", wraplength=310).grid(row=4, column=0, sticky="w", pady=(10, 0))
+        ttk.Label(left, text="Add command opens a draft to review. Editing pauses live control; save your profile to keep changes.",
+                  style="CardMuted.TLabel", wraplength=310).grid(row=5, column=0, sticky="w", pady=(10, 0))
 
         right = ttk.Frame(self, style="Surface.TFrame", padding=16)
         right.grid(row=0, column=1, sticky="nsew")
@@ -314,7 +327,7 @@ class CommandEditor(ttk.Frame):
         self.preview_label.grid(row=6, column=0, sticky="ew", pady=(10, 0))
         self.empty_detail = ttk.Frame(right, style="Card.TFrame", padding=(0, 16, 0, 32))
         self.empty_detail.grid(row=2, column=0, rowspan=5, sticky="new")
-        ttk.Label(self.empty_detail, text="Give chat one simple action at a time.\n\nTry !jump for Space or !lookright for a small mouse movement.",
+        ttk.Label(self.empty_detail, text="Give chat one simple action at a time.\n\nChoose a starting action and Add command, or create your own below. Review the binding for your game before applying.",
                   style="CardMuted.TLabel", wraplength=340, justify="left").pack(anchor="w", pady=(0, 18))
         ttk.Button(self.empty_detail, text="Create first command", style="Accent.TButton", command=self.new_command).pack(anchor="w")
         self.error_var.trace_add("write", self._feedback_changed)
@@ -653,6 +666,7 @@ class CommandEditor(ttk.Frame):
         count = len(self._commands)
         self.count_var.set(f"{len(visible)} of {count} shown" if query else f"{count} of {MAX_COMMANDS} commands")
         self.new_button.state(["disabled"] if count >= MAX_COMMANDS else ["!disabled"])
+        self.add_starter_button.state(["disabled"] if count >= MAX_COMMANDS else ["!disabled"])
         if count >= MAX_COMMANDS:
             self.duplicate_button.state(["disabled"])
         self.clear_search_button.state(["!disabled"] if self.filter_var.get() else ["disabled"])
@@ -763,20 +777,41 @@ class CommandEditor(ttk.Frame):
         self.set_commands(self._commands, select_trigger=selected)
 
     def new_command(self) -> None:
+        self._create_draft(Command("!action", "space"))
+
+    def create_from_starter(self, label: str | None = None) -> None:
+        """Open a reviewable draft; selecting a starter never applies input."""
+        try:
+            command = starter_command(self.starter_var.get() if label is None else label)
+        except ValueError:
+            self._on_notice("Choose a starting action from the list before adding a command.")
+            return
+        self._create_draft(command)
+
+    def _create_draft(self, command: Command) -> None:
+        # Do not resolve/discard a pending edit when creation is impossible.
+        if len(self._commands) >= MAX_COMMANDS:
+            self.error_var.set(f"A profile supports at most {MAX_COMMANDS} commands. Remove one first.")
+            return
         if not self._resolve_pending():
             return
+        # Applying a pending new draft above may consume the final slot.
         if len(self._commands) >= MAX_COMMANDS:
             self.error_var.set(f"A profile supports at most {MAX_COMMANDS} commands. Remove one first.")
             return
         if not self._pause():
             return
         self._return_trigger = self._selected_trigger
-        self._load_form(Command(unique_trigger(self._commands), "space"), new=True)
+        self._load_form(replace(command, trigger=unique_trigger(self._commands, command.trigger)), new=True)
         self._restore_selection()
         self.trigger_entry.focus_set()
         self.trigger_entry.selection_range(0, "end")
+        self._on_notice("Command draft ready. Review its name and game binding, then Apply command.")
 
     def duplicate_command(self) -> None:
+        if len(self._commands) >= MAX_COMMANDS:
+            self.error_var.set(f"A profile supports at most {MAX_COMMANDS} commands. Remove one first.")
+            return
         if not self._resolve_pending():
             return
         current = next((command for command in self._commands if command.trigger == self._selected_trigger), None)

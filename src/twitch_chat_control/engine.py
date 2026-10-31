@@ -61,6 +61,8 @@ class EngineEvent:
     command: str = ""
     user_id: str = ""
     timestamp: float = 0.0
+    action: Command | None = None
+    generation: int = 0
 
 
 @dataclass(frozen=True, slots=True)
@@ -76,6 +78,7 @@ class EngineSnapshot:
     pending_seconds: float
     backend_fault: bool
     active_action: str | None = None
+    generation: int = 0
 
 
 @dataclass(frozen=True, slots=True)
@@ -158,13 +161,16 @@ class SafetyEngine:
                                   self._accepted, self._rejected,
                                   max(0.0, self._pending_until - self._clock()) if self._state == "pending" else 0.0,
                                   self._faulted,
-                                  self._active.command.action_label if self._active else None)
+                                  self._active.command.action_label if self._active else None,
+                                  self._generation)
 
-    def _emit(self, kind: str, reason: str, command: str = "", user_id: str = "") -> None:
+    def _emit(self, kind: str, reason: str, command: str = "", user_id: str = "",
+              *, action: Command | None = None) -> None:
         if self._on_event is None:
             return
         try:
-            self._on_event(EngineEvent(kind, reason, command, user_id, self._clock()))
+            self._on_event(EngineEvent(kind, reason, command, user_id, self._clock(), action,
+                                      self._generation))
         except Exception:
             # UI/logging failure cannot turn into an input bypass or crash a
             # key-release path. The UI's own heartbeat governs its availability.
@@ -409,7 +415,8 @@ class SafetyEngine:
             self._command_times[trigger] = now
             self._action_times.append(now)
             self._accepted += 1
-            self._emit("accepted", "preview_queued" if self._preview else "live_queued", trigger, user_id)
+            self._emit("accepted", "preview_queued" if self._preview else "live_queued", trigger, user_id,
+                       action=command)
             return Decision(True, "queued", trigger)
 
     def tick(self) -> None:
@@ -446,7 +453,7 @@ class SafetyEngine:
                 self._release_at = 0.0
                 self._next_execution_at = max(self._next_execution_at, now + self.RELEASE_GAP_SECONDS)
                 self._emit("released", "mouse_button_released" if action.command.is_mouse else "tap_finished",
-                           action.command.trigger, action.user_id)
+                           action.command.trigger, action.user_id, action=action.command)
             # Discard stale work even when a key/button is held; never replay a backlog.
             while self._queue and (self._queue[0].expires_at <= now or self._queue[0].generation != self._generation):
                 action = self._queue.popleft()
@@ -458,7 +465,7 @@ class SafetyEngine:
                 self._next_execution_at = now + self._profile.global_cooldown_ms / 1000
                 reason = {"key": "would_tap", "mouse_button": "would_press_mouse_button",
                           "mouse_move": "would_move_mouse", "mouse_wheel": "would_scroll_mouse"}[action.command.action_type]
-                self._emit("preview", reason, action.command.trigger, action.user_id)
+                self._emit("preview", reason, action.command.trigger, action.user_id, action=action.command)
                 return
             # Last guard directly before the native API; the native backend
             # checks independently again immediately before SendInput.
@@ -491,4 +498,4 @@ class SafetyEngine:
             self._next_execution_at = now + self._profile.global_cooldown_ms / 1000
             reason = {"key": "key_down", "mouse_button": "mouse_button_down",
                       "mouse_move": "mouse_moved", "mouse_wheel": "mouse_scrolled"}[action.command.action_type]
-            self._emit("executed", reason, action.command.trigger, action.user_id)
+            self._emit("executed", reason, action.command.trigger, action.user_id, action=action.command)
