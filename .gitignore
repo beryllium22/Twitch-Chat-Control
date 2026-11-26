@@ -1,0 +1,33 @@
+# Local environments, generated builds, and test output.
+.venv/
+__pycache__/
+*.py[cod]
+*.egg-info/
+.pytest_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+build/
+dist/
+artifacts/
+
+# Credentials and user data never belong in a source distribution.
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+*.p12
+*.pfx
+credentials*
+secrets*
+tokens*
+local-settings*
+profiles/
+*.log
+
+# Editors and desktop metadata.
+.idea/
+.vscode/
+.DS_Store
+Thumbs.db
