@@ -1,12 +1,39 @@
 # Twitch Chat Control
 
-A Windows desktop app that lets a streamer connect their own Twitch channel and map exact chat commands to bounded keyboard and mouse actions for games.
+Let your Twitch chat play your game, on your terms. Twitch Chat Control is a Windows desktop app that maps **exact chat commands** (like `!jump` or `!lookleft`) to **bounded keyboard and mouse actions**, with local arming, an emergency stop, and a Preview mode that never touches your real input.
 
-**Development preview. Starts disarmed. Preview mode sends no input.** Live control requires an explicitly selected game window, a working local emergency hotkey, and a separate local arming action. Do not run as administrator.
+> **Development preview.** Starts disarmed. Preview mode sends no input. Live control requires an explicitly selected game window, a working local emergency hotkey (F8), and a separate local arming action. Do not run as administrator.
 
-## Run from source
+![Session tab with the Practice pad showing a Preview-only mouse movement](docs/screenshots/02b-practice-pad.png)
 
-Windows 10/11, 64-bit Python 3.11–3.14 with Tcl/Tk:
+## Features
+
+- **Safe by default.** Starts paused in Preview. Live control needs a selected game window, a working F8 stop hotkey, and a deliberate local "Arm" click each session.
+- **Exact commands only.** Chat can't add commands, change settings, type text, press combinations, or run anything. Only the commands you configure are accepted.
+- **Keyboard and mouse actions.** Allowlisted keys, mouse buttons, relative mouse movement and vertical wheel scrolling, all with short, bounded holds and an independent release watchdog.
+- **Point-and-click setup.** Ready-made starter profiles (WASD, arrow keys, keyboard and mouse) and a visual command editor. No JSON editing.
+- **Practice pad.** Try any command offline and see what it would do. No Twitch account or game needed.
+- **You decide who plays.** Moderators-only by default, with audience roles, allow/block lists, per-viewer, per-command and per-minute limits.
+- **Your own Twitch app, no secrets.** You supply your own Public Client ID and sign in with device authorization. No client secret, and tokens stay in memory.
+- **Private by design.** No telemetry, no network listener, no auto-update, and no credentials in profiles or builds.
+
+## Screenshots
+
+Captured from the real app running in Preview mode (offline, no Twitch connection, no input sent).
+
+| Session and Practice pad | Controls and commands |
+| --- | --- |
+| ![Session tab](docs/screenshots/02-preview-running.png) | ![Controls and commands tab](docs/screenshots/03-controls-and-commands.png) |
+| **Safety and access** | **Activity** |
+| ![Safety and access tab](docs/screenshots/04-safety-and-access.png) | ![Activity tab](docs/screenshots/05-activity.png) |
+
+*Screenshots were captured on Linux, so fonts differ slightly from the Windows app.*
+
+## Install (Windows)
+
+Requirements: Windows 10/11 (64-bit) and 64-bit Python 3.11–3.14 with Tcl/Tk (the default python.org installer includes it).
+
+A signed installer is not available yet. Until a release is published, run from source:
 
 ```powershell
 py -3.12 -m venv .venv
@@ -15,6 +42,13 @@ py -3.12 -m venv .venv
 ```
 
 Linux and macOS support the offline preview and automated tests; native game input is Windows only.
+
+## Configuration
+
+There are no environment variables or `.env` files. The app deliberately does not load them. Everything is configured in the app:
+
+- **Twitch:** paste your own *Public* Client ID on the **Session** tab and sign in with device authorization. See [Twitch setup](docs/TWITCH_SETUP.md). Never paste a client secret anywhere.
+- **Commands and safety limits:** edit in the app and use **Save profile** to write a profile JSON file. Profiles never contain credentials, selected windows, or armed state.
 
 ## First session
 
@@ -81,3 +115,11 @@ The editor and imported JSON use the same strict validation. See the [GUI profil
 The Windows CI workflow runs tests, performs a GUI construction smoke check, scans the distribution, and uploads a portable ZIP artifact. It builds from an explicit entry point and explicit public documentation; local profiles and credential files are never bundled. No signing certificate is bundled. Build artifacts are unsigned development builds until a separately managed signing/release process exists.
 
 See [validation and manual acceptance](docs/VALIDATION.md) before streaming with live input.
+
+## Contributing
+
+Issues and pull requests are welcome. Please run the tests, `ruff`, and `scripts/check_distribution.py` (see above) before opening a PR. Never include credentials, tokens, or personal profile files in an issue or PR. Report suspected security problems privately through the repository's **Security** tab (private vulnerability reporting) instead of a public issue. Read the [security model](docs/SECURITY.md) first.
+
+## License
+
+[MIT](LICENSE)
